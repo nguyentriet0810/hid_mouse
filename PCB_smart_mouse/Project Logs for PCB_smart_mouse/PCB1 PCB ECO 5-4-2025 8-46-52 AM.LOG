@@ -1,0 +1,9 @@
+Added Component: Designator=GY1(GY9250)
+Added Pin To Net: NetName=3.3V Pin=GY1-1
+Added Pin To Net: NetName=B- Pin=GY1-2
+Added Pin To Net: NetName=SCL Pin=GY1-3
+Added Pin To Net: NetName=SDA Pin=GY1-4
+Added Pin To Net: NetName=NetGY1_7 Pin=GY1-7
+Added Pin To Net: NetName=INT Pin=GY1-8
+Added Pin To Net: NetName=NetGY1_9 Pin=GY1-9
+Added Member To Class: ClassName=schematic Member=Component GY1 GY9250

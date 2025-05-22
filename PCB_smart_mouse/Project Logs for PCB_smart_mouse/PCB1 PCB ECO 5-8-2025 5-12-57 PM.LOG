@@ -1,0 +1,4 @@
+Removed Member From Class: ClassName=schematic Member=R21
+Removed Member From Class: ClassName=schematic Member=R22
+Added Pin To Net: NetName=USB_D- Pin=X1-13
+Added Pin To Net: NetName=USB_D+ Pin=X1-14

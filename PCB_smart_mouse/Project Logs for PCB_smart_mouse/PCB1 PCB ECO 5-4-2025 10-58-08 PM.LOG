@@ -1,0 +1,12 @@
+Change Component Description : Designator=J1 Old Description=Conn Data USB Micro B w/Flange SMT Bottom Mnt LF New Description=Conn Data USB Micro B w/Flange SMT Bottom Mnt LF | Molex Incorporated 47346-0001
+Added Component: Designator=H?(XH2.54M-3)
+Add component (AddParameter): Name = "Chung_Loai"; Value = "C?m"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Don_Vi"; Value = "Con"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Ghi_Chu"; Value = ""; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Kieu_Chan"; Value = ""; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Ma_Hang"; Value = "MH001292"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Ten_Linh_Kien"; Value = "Header 3P XH2.54-3P Ð?c Th?ng"; VariantName = "[No Variations]"
+Added Pin To Net: NetName=RX0 Pin=H?-1
+Added Pin To Net: NetName=TX0 Pin=H?-2
+Added Pin To Net: NetName=B- Pin=H?-3
+Added Member To Class: ClassName=schematic Member=Component H? Header 3P 2.54 Duc Thang

@@ -1,0 +1,7 @@
+Removed Pin From Net: NetName=BUTTON1 Pin=X1-18
+Removed Pin From Net: NetName=BUTTON2 Pin=X1-19
+Change Component Description : Designator=J1 Old Description=Conn Data USB Micro B w/Flange SMT Bottom Mnt LF New Description=Conn Data USB Micro B w/Flange SMT Bottom Mnt LF | Molex Incorporated 47346-0001
+Added Pin To Net: NetName=BUTTON2 Pin=X1-18
+Added Pin To Net: NetName=BUTTON1 Pin=X1-19
+Change Net Name : Old Net Name=BUTTON1 New Net Name=BUTTON2
+Change Net Name : Old Net Name=BUTTON2 New Net Name=BUTTON1

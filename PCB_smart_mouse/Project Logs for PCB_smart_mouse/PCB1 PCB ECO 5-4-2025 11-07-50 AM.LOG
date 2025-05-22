@@ -1,0 +1,9 @@
+Removed Pin From Net: NetName=LED1 Pin=R11-1
+Removed Pin From Net: NetName=LED2 Pin=R12-1
+Removed Pin From Net: NetName=LED3 Pin=R14-1
+Removed Pin From Net: NetName=LED4 Pin=R15-1
+Added Pin To Net: NetName=LED4 Pin=R11-1
+Added Pin To Net: NetName=LED3 Pin=R12-1
+Added Pin To Net: NetName=LED2 Pin=R14-1
+Added Pin To Net: NetName=LED1 Pin=R15-1
+Added Member To Class: ClassName=schematic Member=Component GY1 GY9250

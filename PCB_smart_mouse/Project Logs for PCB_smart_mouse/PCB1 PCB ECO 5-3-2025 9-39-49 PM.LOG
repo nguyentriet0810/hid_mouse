@@ -1,0 +1,11 @@
+Removed Pin From Net: NetName=SDA Pin=R21-1
+Removed Pin From Net: NetName=3.3V Pin=R21-2
+Removed Pin From Net: NetName=SCL Pin=R22-1
+Removed Pin From Net: NetName=3.3V Pin=R22-2
+Removed Pin From Net: NetName=SDA Pin=X1-4
+Removed Pin From Net: NetName=SCL Pin=X1-5
+Removed Member From Class: ClassName=schematic Member=R21
+Removed Member From Class: ClassName=schematic Member=R22
+Change Component Description : Designator=J1 Old Description=Conn Data USB Micro B w/Flange SMT Bottom Mnt LF New Description=Conn Data USB Micro B w/Flange SMT Bottom Mnt LF | Molex Incorporated 47346-0001
+Added Pin To Net: NetName=SCL Pin=X1-4
+Added Pin To Net: NetName=SDA Pin=X1-5

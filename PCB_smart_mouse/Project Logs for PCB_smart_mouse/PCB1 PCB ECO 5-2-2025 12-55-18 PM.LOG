@@ -1,0 +1,124 @@
+Added Component: Designator=C?(Cap 1206)
+Added Component: Designator=C?(Cap 1206)
+Added Component: Designator=C?(Cap 1206)
+Added Component: Designator=C?(Cap 1206)
+Added Component: Designator=C?(Cap 1206)
+Added Component: Designator=C?(Cap 1206)
+Added Component: Designator=C?(Cap 1206)
+Added Component: Designator=D?(DIODE 1A)
+Add component (AddParameter): Name = "Chung_Loai"; Value = "C?m"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Don_Vi"; Value = "Con"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Ghi Chu"; Value = ""; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Kieu_Chan"; Value = ""; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Ma_Hang"; Value = "MH001063"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Ten_Linh_Kien"; Value = "Diode 1N4007 1A (DIP)"; VariantName = "[No Variations]"
+Added Component: Designator=GY?(GY9250)
+Added Component: Designator=H?(Header 2P DC 2.54)
+Add component (AddParameter): Name = "Chung_Loai"; Value = "C?m"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Don_Vi"; Value = "Con"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Ghi_Chu"; Value = ""; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Kieu_Chan"; Value = ""; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Ma_Hang"; Value = "MH002852"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Ten_Linh_Kien"; Value = "Header 2P XH2.54-2P Ð?c Cong"; VariantName = "[No Variations]"
+Added Component: Designator=J?(MOLEX_47346-0001)
+Add component (AddParameter): Name = "Check_prices"; Value = "https://www.snapeda.com/parts/47346-0001/Molex/view-part/?ref=eda"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "MF"; Value = "Molex"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "MP"; Value = "47346-0001"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Package"; Value = "None"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "SnapEDA_Link"; Value = "https://www.snapeda.com/parts/47346-0001/Molex/view-part/?ref=snap"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Value"; Value = ""; VariantName = "[No Variations]"
+Added Component: Designator=R?(RES 1206)
+Add component (AddParameter): Name = "Category"; Value = "Resistors"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "ComponentLink1Description"; Value = "http://www.vishay.com/docs/20035/dcrcwe3.pdf"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "ComponentLink1URL"; Value = "http://www.vishay.com/docs/20035/dcrcwe3.pdf"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Composition"; Value = "Thick Film"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Features"; Value = "Automotive AEC-Q200"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Height"; Value = "0.016" (0.40mm)"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Manufacturer"; Value = "Vishay Dale"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Manufacturer Part Number"; Value = "CRCW040210K0FKED"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Number of Terminations"; Value = "2"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Operating Temperature"; Value = "-55°C ~ 155°C"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Package / Case"; Value = "0402 (1005 Metric)"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Packaging"; Value = "Cut Tape (CT)"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Power (Watts)"; Value = "0.063W, 1/16W"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Pricing 1"; Value = "10=0.083, 50=0.0444, 200=0.0255, 1000=0.0174 (USD)"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Resistance (Ohms)"; Value = "10k"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "RoHS"; Value = "RoHS Compliant"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Size / Dimension"; Value = "0.039" L x 0.020" W (1.00mm x 0.50mm)"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Stock 1"; Value = "2392462"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Supplier 1"; Value = "Digi-Key"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Supplier Device Package"; Value = "0402 (1005 Metric)"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Supplier Part Number 1"; Value = "541-10.0KLCT-ND"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Temperature Coefficient"; Value = "±100ppm/°C"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Tolerance"; Value = "±1%"; VariantName = "[No Variations]"
+Added Component: Designator=U?(SOT-23)
+Add component (AddParameter): Name = "Availability"; Value = "In Stock"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Check_prices"; Value = "https://www.snapeda.com/parts/XC6206P332MR-G/Torex/view-part/?ref=eda"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "MF"; Value = "Torex"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "MP"; Value = "XC6206P332MR-G"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Package"; Value = "SOT-23-3 Torex"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Price"; Value = "None"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Purchase-URL"; Value = "https://pricing.snapeda.com/search/part/XC6206P332MR-G/?ref=eda"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "SnapEDA_Link"; Value = "https://www.snapeda.com/parts/XC6206P332MR-G/Torex/view-part/?ref=snap"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Value"; Value = ""; VariantName = "[No Variations]"
+Added Component: Designator=X?(ESP32S3WROOM1N8R2)
+Add component (AddParameter): Name = "Check_prices"; Value = "https://www.snapeda.com/parts/ESP32-S3-WROOM-1-N16R8/Espressif+Systems/view-part/?ref=eda"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "MF"; Value = "Espressif Systems"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "MP"; Value = "ESP32-S3-WROOM-1-N16R8"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Package"; Value = "NON STANDARD Espressif Systems"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "SnapEDA_Link"; Value = "https://www.snapeda.com/parts/ESP32-S3-WROOM-1-N16R8/Espressif+Systems/view-part/?ref=snap"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Value"; Value = ""; VariantName = "[No Variations]"
+Added Pin To Net: NetName=BUTTON Pin=C?-1
+Added Pin To Net: NetName=NetC?_1 Pin=C?-1
+Added Pin To Net: NetName=GND Pin=C?-2
+Added Pin To Net: NetName=GND Pin=C?-2
+Added Pin To Net: NetName=GND Pin=C?-2
+Added Pin To Net: NetName=GND Pin=C?-2
+Added Pin To Net: NetName=GND Pin=C?-2
+Added Pin To Net: NetName=GND Pin=C?-2
+Added Pin To Net: NetName=GND Pin=C?-2
+Added Pin To Net: NetName=NetD?_1 Pin=D?-1
+Added Pin To Net: NetName=3.3V Pin=GY?-1
+Added Pin To Net: NetName=GND Pin=GY?-2
+Added Pin To Net: NetName=SCL Pin=GY?-3
+Added Pin To Net: NetName=SDA Pin=GY?-4
+Added Pin To Net: NetName=NetH?_1 Pin=H?-1
+Added Pin To Net: NetName=BUTTON Pin=H?-2
+Added Pin To Net: NetName=NetD?_1 Pin=J?-1
+Added Pin To Net: NetName=USB_D+ Pin=J?-2
+Added Pin To Net: NetName=USB_D- Pin=J?-3
+Added Pin To Net: NetName=GND Pin=J?-5
+Added Pin To Net: NetName=NetC?_1 Pin=J?-S6
+Added Pin To Net: NetName=GND Pin=R?-1
+Added Pin To Net: NetName=NetH?_1 Pin=R?-2
+Added Pin To Net: NetName=GND Pin=X?-1
+Added Pin To Net: NetName=3.3V Pin=X?-2
+Added Pin To Net: NetName=SDA Pin=X?-12
+Added Pin To Net: NetName=USB_D- Pin=X?-13
+Added Pin To Net: NetName=USB_D+ Pin=X?-14
+Added Pin To Net: NetName=SCL Pin=X?-17
+Added Pin To Net: NetName=GND Pin=X?-40
+Added Pin To Net: NetName=GND Pin=X?-41
+Added Pin To Net: NetName=GND Pin=X?-42
+Added Pin To Net: NetName=GND Pin=X?-43
+Added Pin To Net: NetName=GND Pin=X?-44
+Added Pin To Net: NetName=GND Pin=X?-45
+Added Pin To Net: NetName=GND Pin=X?-46
+Added Pin To Net: NetName=GND Pin=X?-47
+Added Pin To Net: NetName=GND Pin=X?-48
+Added Pin To Net: NetName=GND Pin=X?-49
+Added Member To Class: ClassName=schematic Member=Component C? 100nF
+Added Member To Class: ClassName=schematic Member=Component C? 100nF
+Added Member To Class: ClassName=schematic Member=Component C? 100nF
+Added Member To Class: ClassName=schematic Member=Component C? 100nF
+Added Member To Class: ClassName=schematic Member=Component C? 100nF
+Added Member To Class: ClassName=schematic Member=Component C? 100nF
+Added Member To Class: ClassName=schematic Member=Component C? 100nF
+Added Member To Class: ClassName=schematic Member=Component D? 100v
+Added Member To Class: ClassName=schematic Member=Component GY? GY9250
+Added Member To Class: ClassName=schematic Member=Component H? Header 2P 2.54 Duc Cong
+Added Member To Class: ClassName=schematic Member=Component J? 47346-0001
+Added Member To Class: ClassName=schematic Member=Component R? 100R
+Added Member To Class: ClassName=schematic Member=Component U? PMIC-LDO-XC6206P332MR-G(SOT23)
+Added Member To Class: ClassName=schematic Member=Component X? ESP32-S3-WROOM-1-N16R8
+Added Room: Name=schematic
