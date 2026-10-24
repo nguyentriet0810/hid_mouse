@@ -1,0 +1,72 @@
+name: Firmware N16R8
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+    paths:
+      - 'firmware_idf/**'
+      - '.github/workflows/firmware.yml'
+  pull_request:
+    paths:
+      - 'firmware_idf/**'
+      - '.github/workflows/firmware.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Strict C host tests
+        run: python3 firmware_idf/tools/test-host.py
+      - name: Release and partition tests
+        run: python3 -m unittest discover -s firmware_idf/tests -p 'test_*.py'
+
+  firmware:
+    needs: host-tests
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:v5.3.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ESP32-S3 N16R8 with ESP-IDF 5.3.1
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py -C firmware_idf build
+      - name: Prepare versioned OTA assets without credentials
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            python firmware_idf/tools/make-release.py --tag "$GITHUB_REF_NAME"
+          else
+            python firmware_idf/tools/make-release.py
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: esp32s3-n16r8
+          path: firmware_idf/release/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: firmware
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: esp32s3-n16r8
+          path: release
+      - name: Publish GitHub Release for the pushed version tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "$GITHUB_REF_NAME" --generate-notes

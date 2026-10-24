@@ -1,0 +1,54 @@
+menu "ESP Mouse"
+
+config MOUSE_DEVICE_NAME
+    string "Bluetooth device name (1..20 ASCII characters)"
+    default "ESP32 Air Mouse"
+    help
+        Name appears in the scan response. Keep it at most 20 ASCII characters.
+
+config MOUSE_DEADZONE_DEGREES
+    int "Neutral deadzone in degrees"
+    range 1 30
+    default 6
+
+config MOUSE_GAIN
+    int "Pointer speed: pixels/second/degree outside deadzone"
+    range 1 200
+    default 45
+
+config MOUSE_MAX_SPEED
+    int "Maximum pointer speed in pixels/second"
+    range 50 5000
+    default 1300
+
+config MOUSE_WHEEL_GAIN_TENTHS
+    int "Wheel steps/second/degree, in tenths"
+    range 1 100
+    default 5
+
+config MOUSE_INVERT_X
+    bool "Reverse horizontal movement"
+    default n
+
+config MOUSE_INVERT_Y
+    bool "Reverse vertical movement"
+    default n
+
+config MOUSE_BATTERY_LEVEL
+    int "Development battery level (fixed value, not measured)"
+    range 0 100
+    default 99
+    help
+        The schematic has no battery ADC divider or fuel gauge. This fixed
+        value preserves the old firmware's 99 percent placeholder. Replace
+        with real measurement before relying on battery percentage.
+
+config MOUSE_VENDOR_ID
+    hex "Development PnP vendor ID"
+    range 0x0000 0xFFFF
+    default 0xFFFF
+    help
+        Placeholder for development. Set your assigned Bluetooth SIG vendor
+        ID and update product/version before a production release.
+
+endmenu

@@ -1,0 +1,625 @@
+/* SPDX-License-Identifier: MIT
+ * ESP-IDF boundary adapter. See docs/MISRA.md for SDK-specific deviations.
+ */
+#include "ble_mouse.h"
+#include <stddef.h>
+#include <string.h>
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wundef"
+#include "esp_bt.h"
+#include "esp_bt_main.h"
+#include "esp_gap_ble_api.h"
+#include "esp_gatts_api.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
+#include "freertos/task.h"
+#include "sdkconfig.h"
+#pragma GCC diagnostic pop
+
+#define INIT_ADV_BIT BIT0
+#define INIT_SCAN_BIT BIT1
+#define INIT_HID_BIT BIT2
+#define INIT_INFO_BIT BIT3
+#define INIT_FAILURE_BIT BIT4
+#define INIT_BATTERY_BIT BIT5
+#define INIT_REQUIRED_BITS (INIT_ADV_BIT | INIT_SCAN_BIT | INIT_HID_BIT | INIT_INFO_BIT | INIT_BATTERY_BIT)
+#define HID_SERVICE_INSTANCE UINT8_C(0)
+#define INFO_SERVICE_INSTANCE UINT8_C(1)
+#define BATTERY_SERVICE_INSTANCE UINT8_C(2)
+#define MOUSE_REPORT_ID UINT8_C(1)
+
+typedef enum
+{
+    HID_SERVICE = 0,
+    HID_INFO_DECLARATION,
+    HID_INFO_VALUE,
+    HID_MAP_DECLARATION,
+    HID_MAP_VALUE,
+    HID_CONTROL_DECLARATION,
+    HID_CONTROL_VALUE,
+    HID_REPORT_DECLARATION,
+    HID_REPORT_VALUE,
+    HID_REPORT_CCC,
+    HID_REPORT_REFERENCE,
+    HID_ATTRIBUTE_COUNT
+} hid_attribute_t;
+
+typedef enum
+{
+    INFO_SERVICE = 0,
+    INFO_MANUFACTURER_DECLARATION,
+    INFO_MANUFACTURER_VALUE,
+    INFO_MODEL_DECLARATION,
+    INFO_MODEL_VALUE,
+    INFO_PNP_DECLARATION,
+    INFO_PNP_VALUE,
+    INFO_ATTRIBUTE_COUNT
+} info_attribute_t;
+
+typedef enum
+{
+    BATTERY_SERVICE = 0,
+    BATTERY_LEVEL_DECLARATION,
+    BATTERY_LEVEL_VALUE,
+    BATTERY_LEVEL_CCC,
+    BATTERY_ATTRIBUTE_COUNT
+} battery_attribute_t;
+
+typedef struct
+{
+    bool connected;
+    bool encrypted;
+    bool subscribed;
+    bool suspended;
+    bool congested;
+    uint16_t connection_id;
+    uint32_t generation;
+} connection_t;
+
+static const char * const TAG = "ble_mouse";
+static StaticEventGroup_t s_init_storage;
+static EventGroupHandle_t s_init_events = NULL;
+static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
+static connection_t s_connection = {0};
+static esp_gatt_if_t s_interface = ESP_GATT_IF_NONE;
+static uint16_t s_hid_handles[HID_ATTRIBUTE_COUNT];
+static uint16_t s_info_handles[INFO_ATTRIBUTE_COUNT];
+static uint16_t s_battery_handles[BATTERY_ATTRIBUTE_COUNT];
+
+/* SDK attribute API takes mutable pointers. Objects remain static and writable;
+ * application code does not cast away const (deviation D-02). */
+static uint16_t s_primary_uuid = ESP_GATT_UUID_PRI_SERVICE;
+static uint16_t s_declaration_uuid = ESP_GATT_UUID_CHAR_DECLARE;
+static uint16_t s_ccc_uuid = ESP_GATT_UUID_CHAR_CLIENT_CONFIG;
+static uint16_t s_hid_uuid = UINT16_C(0x1812);
+static uint16_t s_hid_info_uuid = UINT16_C(0x2A4A);
+static uint16_t s_hid_map_uuid = UINT16_C(0x2A4B);
+static uint16_t s_hid_control_uuid = UINT16_C(0x2A4C);
+static uint16_t s_hid_report_uuid = UINT16_C(0x2A4D);
+static uint16_t s_report_reference_uuid = UINT16_C(0x2908);
+static uint16_t s_info_uuid = UINT16_C(0x180A);
+static uint16_t s_manufacturer_uuid = UINT16_C(0x2A29);
+static uint16_t s_model_uuid = UINT16_C(0x2A24);
+static uint16_t s_pnp_uuid = UINT16_C(0x2A50);
+static uint16_t s_battery_uuid = UINT16_C(0x180F);
+static uint16_t s_battery_level_uuid = UINT16_C(0x2A19);
+static uint8_t s_property_read = ESP_GATT_CHAR_PROP_BIT_READ;
+static uint8_t s_property_write = ESP_GATT_CHAR_PROP_BIT_WRITE_NR;
+static uint8_t s_property_notify = ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_NOTIFY;
+static uint8_t s_hid_information[4] = {0x11U, 0x01U, 0x00U, 0x02U};
+static uint8_t s_control[1] = {0x01U};
+static uint8_t s_report[4] = {0U};
+static uint8_t s_ccc[2] = {0U};
+static uint8_t s_reference[2] = {MOUSE_REPORT_ID, 0x01U};
+static uint8_t s_manufacturer[] = "ESP Mouse Project";
+static uint8_t s_model[] = "ESP32-S3 MPU6050";
+/* Explicit development value, not a fuel-gauge measurement. */
+static uint8_t s_battery_level = (uint8_t)CONFIG_MOUSE_BATTERY_LEVEL;
+static uint8_t s_battery_ccc[2] = {0U};
+static uint8_t s_pnp[7] = {
+    0x01U, /* Bluetooth SIG vendor ID source. 0xFFFF = development placeholder. */
+    (uint8_t)(CONFIG_MOUSE_VENDOR_ID & 0xFFU),
+    (uint8_t)((CONFIG_MOUSE_VENDOR_ID >> 8U) & 0xFFU),
+    0x01U, 0x00U, /* Product 0x0001. */
+    0x00U, 0x01U  /* Version 0x0100. */
+};
+static uint8_t s_report_map[] = {
+    0x05U, 0x01U,       /* Generic Desktop */
+    0x09U, 0x02U,       /* Mouse */
+    0xA1U, 0x01U,       /* Application collection */
+    0x85U, MOUSE_REPORT_ID,
+    0x09U, 0x01U,       /* Pointer */
+    0xA1U, 0x00U,       /* Physical collection */
+    0x05U, 0x09U,       /* Buttons */
+    0x19U, 0x01U, 0x29U, 0x03U,
+    0x15U, 0x00U, 0x25U, 0x01U,
+    0x95U, 0x03U, 0x75U, 0x01U, 0x81U, 0x02U,
+    0x95U, 0x01U, 0x75U, 0x05U, 0x81U, 0x03U,
+    0x05U, 0x01U,
+    0x09U, 0x30U,       /* X */
+    0x09U, 0x31U,       /* Y */
+    0x09U, 0x38U,       /* Wheel */
+    0x15U, 0x81U, 0x25U, 0x7FU,
+    0x75U, 0x08U, 0x95U, 0x03U, 0x81U, 0x06U,
+    0xC0U, 0xC0U
+};
+
+/* Casts expose object representations to the vendor GATT API; see D-02. */
+#define ATTRIBUTE(uuid_object, permission, maximum, length, pointer) \
+    {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&(uuid_object), \
+      (permission), (maximum), (length), (uint8_t *)(pointer)}}
+
+static const esp_gatts_attr_db_t s_hid_database[HID_ATTRIBUTE_COUNT] = {
+    [HID_SERVICE] = ATTRIBUTE(s_primary_uuid, ESP_GATT_PERM_READ,
+        2U, 2U, &s_hid_uuid),
+    [HID_INFO_DECLARATION] = ATTRIBUTE(s_declaration_uuid, ESP_GATT_PERM_READ,
+        1U, 1U, &s_property_read),
+    [HID_INFO_VALUE] = ATTRIBUTE(s_hid_info_uuid, ESP_GATT_PERM_READ_ENCRYPTED,
+        sizeof(s_hid_information), sizeof(s_hid_information), s_hid_information),
+    [HID_MAP_DECLARATION] = ATTRIBUTE(s_declaration_uuid, ESP_GATT_PERM_READ,
+        1U, 1U, &s_property_read),
+    [HID_MAP_VALUE] = ATTRIBUTE(s_hid_map_uuid, ESP_GATT_PERM_READ_ENCRYPTED,
+        sizeof(s_report_map), sizeof(s_report_map), s_report_map),
+    [HID_CONTROL_DECLARATION] = ATTRIBUTE(s_declaration_uuid, ESP_GATT_PERM_READ,
+        1U, 1U, &s_property_write),
+    [HID_CONTROL_VALUE] = ATTRIBUTE(s_hid_control_uuid, ESP_GATT_PERM_WRITE_ENCRYPTED,
+        sizeof(s_control), sizeof(s_control), s_control),
+    [HID_REPORT_DECLARATION] = ATTRIBUTE(s_declaration_uuid, ESP_GATT_PERM_READ,
+        1U, 1U, &s_property_notify),
+    [HID_REPORT_VALUE] = ATTRIBUTE(s_hid_report_uuid, ESP_GATT_PERM_READ_ENCRYPTED,
+        sizeof(s_report), sizeof(s_report), s_report),
+    [HID_REPORT_CCC] = ATTRIBUTE(s_ccc_uuid,
+        ESP_GATT_PERM_READ_ENCRYPTED | ESP_GATT_PERM_WRITE_ENCRYPTED,
+        sizeof(s_ccc), sizeof(s_ccc), s_ccc),
+    [HID_REPORT_REFERENCE] = ATTRIBUTE(s_report_reference_uuid, ESP_GATT_PERM_READ_ENCRYPTED,
+        sizeof(s_reference), sizeof(s_reference), s_reference)
+};
+
+static const esp_gatts_attr_db_t s_info_database[INFO_ATTRIBUTE_COUNT] = {
+    [INFO_SERVICE] = ATTRIBUTE(s_primary_uuid, ESP_GATT_PERM_READ, 2U, 2U, &s_info_uuid),
+    [INFO_MANUFACTURER_DECLARATION] = ATTRIBUTE(s_declaration_uuid, ESP_GATT_PERM_READ,
+        1U, 1U, &s_property_read),
+    [INFO_MANUFACTURER_VALUE] = ATTRIBUTE(s_manufacturer_uuid, ESP_GATT_PERM_READ,
+        sizeof(s_manufacturer) - 1U, sizeof(s_manufacturer) - 1U, s_manufacturer),
+    [INFO_MODEL_DECLARATION] = ATTRIBUTE(s_declaration_uuid, ESP_GATT_PERM_READ,
+        1U, 1U, &s_property_read),
+    [INFO_MODEL_VALUE] = ATTRIBUTE(s_model_uuid, ESP_GATT_PERM_READ,
+        sizeof(s_model) - 1U, sizeof(s_model) - 1U, s_model),
+    [INFO_PNP_DECLARATION] = ATTRIBUTE(s_declaration_uuid, ESP_GATT_PERM_READ,
+        1U, 1U, &s_property_read),
+    [INFO_PNP_VALUE] = ATTRIBUTE(s_pnp_uuid, ESP_GATT_PERM_READ,
+        sizeof(s_pnp), sizeof(s_pnp), s_pnp)
+};
+
+static const esp_gatts_attr_db_t s_battery_database[BATTERY_ATTRIBUTE_COUNT] = {
+    [BATTERY_SERVICE] = ATTRIBUTE(s_primary_uuid, ESP_GATT_PERM_READ,
+        2U, 2U, &s_battery_uuid),
+    [BATTERY_LEVEL_DECLARATION] = ATTRIBUTE(s_declaration_uuid, ESP_GATT_PERM_READ,
+        1U, 1U, &s_property_notify),
+    [BATTERY_LEVEL_VALUE] = ATTRIBUTE(s_battery_level_uuid, ESP_GATT_PERM_READ,
+        1U, 1U, &s_battery_level),
+    [BATTERY_LEVEL_CCC] = ATTRIBUTE(s_ccc_uuid,
+        ESP_GATT_PERM_READ_ENCRYPTED | ESP_GATT_PERM_WRITE_ENCRYPTED,
+        sizeof(s_battery_ccc), sizeof(s_battery_ccc), s_battery_ccc)
+};
+
+static esp_ble_adv_params_t s_advertising = {
+    .adv_int_min = 0x30U,
+    .adv_int_max = 0x60U,
+    .adv_type = ADV_TYPE_IND,
+    .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
+    .channel_map = ADV_CHNL_ALL,
+    .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY
+};
+static uint8_t s_advertisement[] = {
+    0x02U, 0x01U, 0x06U,             /* General discoverable, BLE only. */
+    0x03U, 0x03U, 0x12U, 0x18U,      /* Complete list: HID UUID 0x1812. */
+    0x03U, 0x19U, 0xC2U, 0x03U       /* Appearance: mouse 0x03C2. */
+};
+static esp_ble_adv_data_t s_scan_response = {
+    .set_scan_rsp = true,
+    .include_name = true,
+    .include_txpower = false
+};
+
+static void log_sdk_error(const char * const operation, esp_err_t result)
+{
+    if (result != ESP_OK)
+    {
+        ESP_LOGE(TAG, "%s: %s", operation, esp_err_to_name(result));
+    }
+}
+
+static void complete_initialization(esp_err_t result, EventBits_t bit)
+{
+    if (result == ESP_OK)
+    {
+        (void)xEventGroupSetBits(s_init_events, bit);
+    }
+    else
+    {
+        (void)xEventGroupSetBits(s_init_events, INIT_FAILURE_BIT);
+        log_sdk_error("BLE initialization callback", result);
+    }
+}
+
+static void gap_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
+{
+    if (param != NULL)
+    {
+        switch (event)
+        {
+            case ESP_GAP_BLE_ADV_DATA_RAW_SET_COMPLETE_EVT:
+                complete_initialization((param->adv_data_raw_cmpl.status ==
+                    ESP_BT_STATUS_SUCCESS) ? ESP_OK : ESP_FAIL, INIT_ADV_BIT);
+                break;
+            case ESP_GAP_BLE_SCAN_RSP_DATA_SET_COMPLETE_EVT:
+                complete_initialization((param->scan_rsp_data_cmpl.status ==
+                    ESP_BT_STATUS_SUCCESS) ? ESP_OK : ESP_FAIL, INIT_SCAN_BIT);
+                break;
+            case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
+                if (param->adv_start_cmpl.status == ESP_BT_STATUS_SUCCESS)
+                {
+                    ESP_LOGI(TAG, "Advertising as %s", CONFIG_MOUSE_DEVICE_NAME);
+                }
+                else
+                {
+                    ESP_LOGE(TAG, "Advertising failed: %u",
+                             (unsigned int)param->adv_start_cmpl.status);
+                }
+                break;
+            case ESP_GAP_BLE_SEC_REQ_EVT:
+                log_sdk_error("Security response", esp_ble_gap_security_rsp(
+                    param->ble_security.ble_req.bd_addr, true));
+                break;
+            case ESP_GAP_BLE_AUTH_CMPL_EVT:
+                portENTER_CRITICAL(&s_state_lock);
+                s_connection.encrypted = param->ble_security.auth_cmpl.success;
+                portEXIT_CRITICAL(&s_state_lock);
+                if (param->ble_security.auth_cmpl.success)
+                {
+                    ESP_LOGI(TAG, "Encrypted BLE connection established");
+                }
+                else
+                {
+                    ESP_LOGE(TAG, "Pairing failed: 0x%02x",
+                        (unsigned int)param->ble_security.auth_cmpl.fail_reason);
+                    log_sdk_error("Disconnect after pairing failure", esp_ble_gap_disconnect(
+                        param->ble_security.auth_cmpl.bd_addr));
+                }
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+static void handle_connection(const esp_ble_gatts_cb_param_t * const param)
+{
+    esp_ble_conn_update_params_t parameters = {0};
+    (void)memcpy(parameters.bda, param->connect.remote_bda, ESP_BD_ADDR_LEN);
+    parameters.min_int = 8U;   /* 10 ms; the central chooses the final interval. */
+    parameters.max_int = 16U;
+    parameters.latency = 0U;
+    parameters.timeout = 400U;
+    portENTER_CRITICAL(&s_state_lock);
+    s_connection.connected = true;
+    s_connection.encrypted = false;
+    s_connection.subscribed = false;
+    s_connection.suspended = false;
+    s_connection.congested = false;
+    s_connection.connection_id = param->connect.conn_id;
+    s_connection.generation++;
+    portEXIT_CRITICAL(&s_state_lock);
+    log_sdk_error("Connection interval request", esp_ble_gap_update_conn_params(&parameters));
+    /* API takes a mutable address; the vendor callback's address is mutable. */
+    esp_bd_addr_t address;
+    (void)memcpy(address, param->connect.remote_bda, sizeof(address));
+    log_sdk_error("Enable encryption", esp_ble_set_encryption(address,
+                   ESP_BLE_SEC_ENCRYPT_NO_MITM));
+}
+
+static void handle_write(const esp_ble_gatts_cb_param_t * const param)
+{
+    if ((!param->write.is_prep) && (param->write.offset == 0U))
+    {
+        if ((param->write.handle == s_hid_handles[HID_REPORT_CCC]) &&
+            (param->write.len == 2U))
+        {
+            const bool subscribed = (param->write.value[0] == 1U) &&
+                                    (param->write.value[1] == 0U);
+            portENTER_CRITICAL(&s_state_lock);
+            s_connection.subscribed = subscribed;
+            portEXIT_CRITICAL(&s_state_lock);
+            ESP_LOGI(TAG, "Mouse notifications %s", subscribed ? "enabled" : "disabled");
+        }
+        else if ((param->write.handle == s_hid_handles[HID_CONTROL_VALUE]) &&
+                 (param->write.len == 1U) && (param->write.value[0] <= 1U))
+        {
+            portENTER_CRITICAL(&s_state_lock);
+            s_connection.suspended = (param->write.value[0] == 0U);
+            portEXIT_CRITICAL(&s_state_lock);
+        }
+        else
+        {
+            /* Other writes cannot change application state. */
+        }
+    }
+}
+
+static void handle_attribute_table(const esp_ble_gatts_cb_param_t * const param)
+{
+    esp_err_t result = ESP_FAIL;
+    if (param->add_attr_tab.status == ESP_GATT_OK)
+    {
+        if ((param->add_attr_tab.svc_inst_id == HID_SERVICE_INSTANCE) &&
+            (param->add_attr_tab.num_handle == (uint16_t)HID_ATTRIBUTE_COUNT))
+        {
+            (void)memcpy(s_hid_handles, param->add_attr_tab.handles, sizeof(s_hid_handles));
+            result = esp_ble_gatts_start_service(s_hid_handles[HID_SERVICE]);
+        }
+        else if ((param->add_attr_tab.svc_inst_id == INFO_SERVICE_INSTANCE) &&
+                 (param->add_attr_tab.num_handle == (uint16_t)INFO_ATTRIBUTE_COUNT))
+        {
+            (void)memcpy(s_info_handles, param->add_attr_tab.handles, sizeof(s_info_handles));
+            result = esp_ble_gatts_start_service(s_info_handles[INFO_SERVICE]);
+        }
+        else if ((param->add_attr_tab.svc_inst_id == BATTERY_SERVICE_INSTANCE) &&
+                 (param->add_attr_tab.num_handle == (uint16_t)BATTERY_ATTRIBUTE_COUNT))
+        {
+            (void)memcpy(s_battery_handles, param->add_attr_tab.handles, sizeof(s_battery_handles));
+            result = esp_ble_gatts_start_service(s_battery_handles[BATTERY_SERVICE]);
+        }
+        else
+        {
+            /* Unexpected service table shape is an initialization failure. */
+        }
+    }
+    if (result != ESP_OK)
+    {
+        complete_initialization(result, 0U);
+    }
+}
+
+static void gatts_callback(esp_gatts_cb_event_t event, esp_gatt_if_t interface,
+                           esp_ble_gatts_cb_param_t *param)
+{
+    if (param != NULL)
+    {
+        switch (event)
+        {
+            case ESP_GATTS_REG_EVT:
+                if (param->reg.status == ESP_GATT_OK)
+                {
+                    s_interface = interface;
+                    esp_err_t result = esp_ble_gatts_create_attr_tab(s_hid_database,
+                        interface, (uint16_t)HID_ATTRIBUTE_COUNT, HID_SERVICE_INSTANCE);
+                    if (result == ESP_OK)
+                    {
+                        result = esp_ble_gatts_create_attr_tab(s_info_database,
+                            interface, (uint16_t)INFO_ATTRIBUTE_COUNT, INFO_SERVICE_INSTANCE);
+                    }
+                    if (result == ESP_OK)
+                    {
+                        result = esp_ble_gatts_create_attr_tab(s_battery_database,
+                            interface, (uint16_t)BATTERY_ATTRIBUTE_COUNT, BATTERY_SERVICE_INSTANCE);
+                    }
+                    if (result != ESP_OK)
+                    {
+                        complete_initialization(result, 0U);
+                    }
+                }
+                else
+                {
+                    complete_initialization(ESP_FAIL, 0U);
+                }
+                break;
+            case ESP_GATTS_CREAT_ATTR_TAB_EVT:
+                handle_attribute_table(param);
+                break;
+            case ESP_GATTS_START_EVT:
+                if (param->start.service_handle == s_hid_handles[HID_SERVICE])
+                {
+                    complete_initialization((param->start.status == ESP_GATT_OK) ?
+                        ESP_OK : ESP_FAIL, INIT_HID_BIT);
+                }
+                else if (param->start.service_handle == s_info_handles[INFO_SERVICE])
+                {
+                    complete_initialization((param->start.status == ESP_GATT_OK) ?
+                        ESP_OK : ESP_FAIL, INIT_INFO_BIT);
+                }
+                else if (param->start.service_handle == s_battery_handles[BATTERY_SERVICE])
+                {
+                    complete_initialization((param->start.status == ESP_GATT_OK) ?
+                        ESP_OK : ESP_FAIL, INIT_BATTERY_BIT);
+                }
+                else
+                {
+                    complete_initialization(ESP_FAIL, 0U);
+                }
+                break;
+            case ESP_GATTS_CONNECT_EVT:
+                handle_connection(param);
+                break;
+            case ESP_GATTS_DISCONNECT_EVT:
+                portENTER_CRITICAL(&s_state_lock);
+                s_connection.connected = false;
+                s_connection.encrypted = false;
+                s_connection.subscribed = false;
+                s_connection.generation++;
+                portEXIT_CRITICAL(&s_state_lock);
+                s_ccc[0] = 0U;
+                s_ccc[1] = 0U;
+                log_sdk_error("Reset subscription", esp_ble_gatts_set_attr_value(
+                    s_hid_handles[HID_REPORT_CCC], sizeof(s_ccc), s_ccc));
+                log_sdk_error("Restart advertising", esp_ble_gap_start_advertising(&s_advertising));
+                ESP_LOGI(TAG, "Disconnected, reason 0x%02x",
+                         (unsigned int)param->disconnect.reason);
+                break;
+            case ESP_GATTS_WRITE_EVT:
+                handle_write(param);
+                break;
+            case ESP_GATTS_CONGEST_EVT:
+                portENTER_CRITICAL(&s_state_lock);
+                s_connection.congested = param->congest.congested;
+                portEXIT_CRITICAL(&s_state_lock);
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+static esp_err_t configure_security(void)
+{
+    esp_ble_auth_req_t authentication = ESP_LE_AUTH_REQ_SC_BOND;
+    esp_ble_io_cap_t capability = ESP_IO_CAP_NONE;
+    uint8_t key_size = 16U;
+    uint8_t keys = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+    esp_err_t result = esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE,
+        &authentication, sizeof(authentication));
+    if (result == ESP_OK)
+    {
+        result = esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE,
+            &capability, sizeof(capability));
+    }
+    if (result == ESP_OK)
+    {
+        result = esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(key_size));
+    }
+    if (result == ESP_OK)
+    {
+        result = esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &keys, sizeof(keys));
+    }
+    if (result == ESP_OK)
+    {
+        result = esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &keys, sizeof(keys));
+    }
+    return result;
+}
+
+esp_err_t ble_mouse_init(void)
+{
+    esp_err_t result = ESP_ERR_INVALID_STATE;
+    const size_t name_length = strlen(CONFIG_MOUSE_DEVICE_NAME);
+    if ((name_length == 0U) || (name_length > 20U))
+    {
+        result = ESP_ERR_INVALID_ARG;
+    }
+    else if (s_init_events == NULL)
+    {
+        s_init_events = xEventGroupCreateStatic(&s_init_storage);
+        result = (s_init_events != NULL) ? ESP_OK : ESP_ERR_NO_MEM;
+        if (result == ESP_OK)
+        {
+            esp_bt_controller_config_t controller = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+            result = esp_bt_controller_init(&controller);
+        }
+        if (result == ESP_OK)
+        {
+            result = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+        }
+        if (result == ESP_OK)
+        {
+            result = esp_bluedroid_init();
+        }
+        if (result == ESP_OK)
+        {
+            result = esp_bluedroid_enable();
+        }
+        if (result == ESP_OK)
+        {
+            result = esp_ble_gap_register_callback(gap_callback);
+        }
+        if (result == ESP_OK)
+        {
+            result = esp_ble_gatts_register_callback(gatts_callback);
+        }
+        if (result == ESP_OK)
+        {
+            result = configure_security();
+        }
+        if (result == ESP_OK)
+        {
+            result = esp_ble_gap_set_device_name(CONFIG_MOUSE_DEVICE_NAME);
+        }
+        if (result == ESP_OK)
+        {
+            result = esp_ble_gap_config_adv_data_raw(s_advertisement, sizeof(s_advertisement));
+        }
+        if (result == ESP_OK)
+        {
+            result = esp_ble_gap_config_adv_data(&s_scan_response);
+        }
+        if (result == ESP_OK)
+        {
+            result = esp_ble_gatts_app_register(UINT16_C(0x55));
+        }
+        if (result == ESP_OK)
+        {
+            /* Finite wait, including explicit wake on any callback failure. */
+            const TickType_t start = xTaskGetTickCount();
+            EventBits_t bits = 0U;
+            do
+            {
+                bits = xEventGroupGetBits(s_init_events);
+                if (((bits & INIT_REQUIRED_BITS) != INIT_REQUIRED_BITS) &&
+                    ((bits & INIT_FAILURE_BIT) == 0U))
+                {
+                    vTaskDelay(pdMS_TO_TICKS(10U));
+                }
+            } while (((bits & INIT_REQUIRED_BITS) != INIT_REQUIRED_BITS) &&
+                     ((bits & INIT_FAILURE_BIT) == 0U) &&
+                     ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(10000U)));
+            if ((bits & INIT_FAILURE_BIT) != 0U)
+            {
+                result = ESP_FAIL;
+            }
+            else if ((bits & INIT_REQUIRED_BITS) != INIT_REQUIRED_BITS)
+            {
+                result = ESP_ERR_TIMEOUT;
+            }
+            else
+            {
+                result = esp_ble_gap_start_advertising(&s_advertising);
+            }
+        }
+    }
+    return result;
+}
+
+ble_mouse_status_t ble_mouse_status(void)
+{
+    ble_mouse_status_t status;
+    portENTER_CRITICAL(&s_state_lock);
+    status.connected = s_connection.connected;
+    status.ready = s_connection.connected && s_connection.encrypted &&
+                   s_connection.subscribed && (!s_connection.suspended);
+    status.generation = s_connection.generation;
+    portEXIT_CRITICAL(&s_state_lock);
+    return status;
+}
+
+esp_err_t ble_mouse_send(const mouse_report_t * const report)
+{
+    esp_err_t result = ESP_ERR_INVALID_ARG;
+    if ((report != NULL) && ((report->buttons & (uint8_t)(~MOUSE_BUTTON_MASK)) == 0U))
+    {
+        connection_t connection;
+        portENTER_CRITICAL(&s_state_lock);
+        connection = s_connection;
+        portEXIT_CRITICAL(&s_state_lock);
+        result = ESP_ERR_INVALID_STATE;
+        if (connection.connected && connection.encrypted && connection.subscribed &&
+            (!connection.suspended) && (!connection.congested))
+        {
+            /* BLE report reference carries the ID; the value has exactly 4 bytes. */
+            uint8_t data[4] = {report->buttons, (uint8_t)report->x,
+                               (uint8_t)report->y, (uint8_t)report->wheel};
+            result = esp_ble_gatts_send_indicate(s_interface, connection.connection_id,
+                s_hid_handles[HID_REPORT_VALUE], sizeof(data), data, false);
+        }
+    }
+    return result;
+}

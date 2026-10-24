@@ -1,0 +1,32 @@
+menu "GitHub OTA update"
+
+config MOUSE_OTA_REPOSITORY
+    string "Public GitHub owner/repository"
+    default "nguyentriet0810/hid_mouse"
+    help
+        Published releases must provide esp32s3-n16r8.manifest and
+        esp32s3-n16r8.bin. Private repository tokens are not embedded.
+
+config MOUSE_OTA_WIFI_SSID
+    string "Initial Wi-Fi SSID (local sdkconfig only)"
+    default ""
+    help
+        Used only if OTA Wi-Fi credentials are missing from NVS. Credentials
+        persist through OTA, so release binaries never need your password.
+        Do not add local sdkconfig or credential files to Git.
+
+config MOUSE_OTA_WIFI_PASSWORD
+    string "Initial Wi-Fi password (local sdkconfig only)"
+    default ""
+    help
+        Leave empty for an open network. Initial credentials are saved in
+        the ota_net NVS namespace. NVS is not encrypted in this build.
+
+config MOUSE_OTA_WIFI_REPLACE_STORED
+    bool "Replace saved Wi-Fi credentials from this build on next OTA attempt"
+    default n
+    help
+        Use with a non-empty initial SSID when changing networks. Normal
+        release builds leave this disabled and retain existing credentials.
+
+endmenu

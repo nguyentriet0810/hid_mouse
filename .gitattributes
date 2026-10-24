@@ -1,0 +1,5 @@
+# Keep the portable ESP-IDF project and CI definitions consistent on Windows/Linux.
+/firmware_idf/** text eol=lf
+/.github/workflows/*.yml text eol=lf
+/.gitignore text eol=lf
+/.gitattributes text eol=lf

@@ -1,0 +1,13 @@
+/build/
+/sdkconfig
+/sdkconfig.old
+/managed_components/
+/tests/build/
+*.log
+/release/
+/sdkconfig.local*
+/credentials*
+/secrets*
+__pycache__/
+*.pyc
+/.vscode/

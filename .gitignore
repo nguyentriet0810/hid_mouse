@@ -1,0 +1,37 @@
+# ESP-IDF generated files and local Wi-Fi credentials.
+**/build/
+**/sdkconfig
+**/sdkconfig.old
+**/sdkconfig.local*
+**/managed_components/
+**/release/
+**/credentials*
+**/secrets*
+*.log
+*.elf
+*.map
+*.bin
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+
+# Local IDE state and generated Altium previews/history (existing tracked files
+# remain tracked; this change does not remove or stage their local deletions).
+/.metadata/
+/.vscode/
+**/History/
+**/Project Logs for */
+**/__Previews/
+*.PrjPcbStructure
+*.PrjPcbVariants
+*.SchDocPreview
+*.PcbDocPreview
+*.SchDoc.Zip
+*.PcbDoc.Zip
+*.PrjPcb.Zip
+*.bak
+*.tmp
+Thumbs.db
+.DS_Store
