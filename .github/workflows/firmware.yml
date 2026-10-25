@@ -23,6 +23,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Strict C host tests
         run: python3 firmware_idf/tools/test-host.py
+      - name: MPU6050 and MPU6500 driver regression tests
+        run: python3 firmware_idf/tests/mpu_driver/run.py --project firmware_idf
       - name: Release and partition tests
         run: python3 -m unittest discover -s firmware_idf/tests -p 'test_*.py'
 

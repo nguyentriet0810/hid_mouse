@@ -32,7 +32,11 @@ See OTA.md for the N16R8 memory preset, partition layout and release workflow.
 
 ## Motion
 
-MPU6050: +/-2 g, +/-500 degrees/s, DLPF 3, 100 Hz output.
+MPU6050/MPU6500: +/-2 g, +/-500 degrees/s, DLPF 3, 100 Hz output.
+WHO_AM_I 0x68 and 0x70 select explicit profiles. MPU6500 additionally requires
+ACCEL_CONFIG2=0x03 for its independent 41 Hz accelerometer DLPF; that register is
+never written on MPU6050. Configured ranges/filter settings are read back before
+samples are exposed, and unknown identities are rejected before reset/config writes.
 Collect 200 samples to estimate gyro bias and neutral attitude. Calibration
 rejects excessive variance, constant rotation and implausible gravity. Combine
 accelerometer roll/pitch with integrated gyroscope using a 0.5 s filter time

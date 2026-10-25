@@ -159,12 +159,12 @@ static void run_mouse(void)
                      * and reset the scheduler baseline instead of catching up in a burst. */
                     previous_sample_us = now_us - INT64_C(10000);
                     wake_tick = xTaskGetTickCount();
-                    ESP_LOGI(TAG, "MPU6050 found at 0x%02x; keep still for 2 seconds",
-                             (unsigned int)sensor.address);
+                    ESP_LOGI(TAG, "IMU %s found at 0x%02x; keep still for 2 seconds",
+                             mpu6050_model_name(&sensor), (unsigned int)sensor.address);
                 }
                 else
                 {
-                    ESP_LOGW(TAG, "MPU6050 unavailable: %s; retry in 2 seconds",
+                    ESP_LOGW(TAG, "IMU unavailable: %s; see mpu6050 identity/transport log; retry in 2 seconds",
                              esp_err_to_name(result));
                 }
             }

@@ -1,6 +1,6 @@
 # ESP32-S3 BLE Air Mouse
 
-Firmware C cho ESP32-S3-WROOM-1-N16R8, MPU6050 va ESP-IDF **5.3.1**.
+Firmware C cho ESP32-S3-WROOM-1-N16R8, MPU6050/MPU6500 va ESP-IDF **5.3.1**.
 Du an moi doc lap voi `../main_code/main_code.ino`.
 
 ## Cau truc
@@ -9,7 +9,7 @@ Du an moi doc lap voi `../main_code/main_code.ino`.
 |---|---|---|
 | `mouse_types` | Kieu du lieu va dinh dang report | Khong |
 | `board_hal` | GPIO, LED active-low, so do chan, I2C bus | ESP-IDF GPIO/I2C |
-| `mpu6050` | Probe 0x68/0x69, WHO_AM_I, cau hinh, doc thanh ghi | ESP-IDF I2C moi |
+| `mpu6050` | Probe 0x68/0x69, detect MPU6050/MPU6500, cau hinh/read-back | ESP-IDF I2C moi |
 | `mouse_motion` | Calibration, gyro bias, loc bo sung, deadzone, toc do, cuon | Khong |
 | `mouse_input` | Chong doi nut, nhan/tha, hang doi, BOOT mode | Khong |
 | `ble_mouse` | GAP, HIDS, DIS, BAS, pairing, encryption, notification | Bluedroid |
@@ -19,6 +19,11 @@ Du an moi doc lap voi `../main_code/main_code.ino`.
 
 Khong dung Arduino, OneButton, BleMouse hay thu vien MPU6050 ben ngoai.
 Core thuan C co the kiem thu tren Windows ma khong can board.
+
+Tu **1.1.1**, driver phan biet WHO_AM_I `0x68` (MPU6050) va `0x70` (MPU6500).
+Module GY-521 tren board da tra ve on dinh `0x70`, nen duoc cau hinh theo profile
+MPU6500, gom bo loc accel rieng tai `ACCEL_CONFIG2`. ID khac van bi tu choi.
+Xem [sensor diagnosis](docs/SENSOR_DIAGNOSTICS.md) ve log va ket qua test tren board.
 
 ## Chan theo schematic
 
@@ -90,6 +95,7 @@ ve migration, Wi-Fi, gesture giu hai nut chuot khi reset va GitHub Release.
 
 ```powershell
 .\tools\test-host.ps1 -Compiler C:\MinGW\bin\gcc.exe
+python .\tests\mpu_driver\run.py --project . --compiler C:\MinGW\bin\gcc.exe
 ```
 
 Xem `docs/MISRA.md` ve pham vi, cac ngoai le va phan viec can cong cu MISRA.

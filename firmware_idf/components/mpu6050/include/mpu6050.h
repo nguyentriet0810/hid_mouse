@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /**
  * @file mpu6050.h
- * @brief Bounded I2C access to MPU6050 acceleration and angular-rate samples.
+ * @brief Bounded I2C access to MPU6050/MPU6500 acceleration and angular-rate samples.
  *
  * This driver converts raw register words into physical units only. Calibration,
  * attitude filtering and cursor policy belong to mouse_motion.
@@ -22,15 +22,21 @@ typedef struct
     i2c_master_dev_handle_t device;
     /** Detected 7-bit address (0x68/0x69), or zero after successful teardown. */
     uint8_t address;
+    /** Verified WHO_AM_I: 0x68 for MPU6050, 0x70 for MPU6500, zero when detached. */
+    uint8_t identity;
 } mpu6050_t;
 
 /**
- * @brief Discover the sensor and configure 100 Hz, +/-2 g, +/-500 degrees/s.
+ * @brief Discover MPU6050/MPU6500 and configure 100 Hz, +/-2 g, +/-500 degrees/s.
  * @param context Zero-initialized device context, exclusively owned by one task.
  * @param bus Borrowed initialized bus; the driver does not own/delete it.
  * @return ESP_OK on success, an argument/state error, or an I2C/device
  *         validation error. Failed setup attempts detach the device if possible.
  * @note Blocks for reset/wake stabilization delays and bounded I2C transfers.
+ *       WHO_AM_I is read at most three times; only 0x68/0x70 are supported.
+ *       Unexpected IDs are logged and
+ *       rejected before any reset/configuration writes. Selected configuration
+ *       registers are verified by read-back before initialization succeeds.
  */
 esp_err_t mpu6050_init(mpu6050_t * const context, i2c_master_bus_handle_t bus);
 
@@ -51,5 +57,13 @@ esp_err_t mpu6050_read(const mpu6050_t * const context,
  * @note The shared bus remains allocated and available to its owner.
  */
 esp_err_t mpu6050_deinit(mpu6050_t * const context);
+
+/**
+ * @brief Name the verified sensor profile for diagnostic logs.
+ * @param context Initialized sensor context, or NULL.
+ * @return Static string MPU6050, MPU6500, or unknown; caller must not free it.
+ * @note The legacy component/API name stays mpu6050 for existing application users.
+ */
+const char *mpu6050_model_name(const mpu6050_t * const context);
 
 #endif

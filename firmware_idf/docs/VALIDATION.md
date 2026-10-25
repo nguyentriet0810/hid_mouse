@@ -1,25 +1,28 @@
 # Validation record
 
 Date: 2026-10-25 (Asia/Bangkok).
-Target: ESP32-S3-WROOM-1-N16R8, MPU6050, schematic GPIO mapping.
+Target: ESP32-S3-WROOM-1-N16R8, MPU6050/MPU6500, schematic GPIO mapping.
 
 ## Automated checks
 
 | Check | Result |
 |---|---|
 | Windows host C tests | PASS, 19 test groups including OTA policy |
+| Real MPU driver with fake SDK I/O | PASS, 14 groups for MPU6050/MPU6500 profiles |
 | Python release/partition tests | PASS, 4 tests |
 | GCC path analyzer | PASS, all 9 production translation units, no diagnostics |
 | ESP-IDF firmware build | PASS, ESP32-S3 image generated |
-| Flash partition fit | PASS; image fits the single-app partition |
+| Flash partition fit | PASS; image fits either 6 MiB OTA slot |
 | MISRA-specific rule checker | NOT RUN; no compliance claim |
-| Flash / pairing / live sensor operation | NOT RUN; hardware validation pending |
-| GitHub Release packaging | PASS, version 1.1.0, binary/manifest/checksums/first-flash ZIP |
+| USB app flash on COM12 | PASS, application only at verified ota_0 offset 0x20000 |
+| Sensor identity/configuration/calibration | PASS on reported GY-521 with MPU6500 ID 0x70; recenter acknowledged |
+| BLE pairing / host pointer behavior | NOT PASS; live log reports pairing error 0x66; separate issue |
+| GitHub Release packaging | PASS, version 1.1.1, binary/manifest/checksums/first-flash ZIP |
 | Live Wi-Fi OTA / power-loss / rollback | NOT RUN; requires real board |
 
 N16R8 build: 16 MiB flash, 8 MiB Octal PSRAM at 80 MHz, two 6 MiB app slots,
-rollback enabled. App image is 1,395,472 bytes (about 1.33 MiB); each app slot has
-about 78% free space. Build outputs remain local and are ignored by Git.
+rollback enabled. Version 1.1.1 app image is 1,396,880 bytes (about 1.33 MiB);
+each app slot has about 78% free space. Build outputs remain local and are ignored by Git.
 
 Build environment:
 
@@ -41,6 +44,7 @@ Reproduce from the firmware directory:
 ```powershell
 .\tools\test-host.ps1 -Compiler C:\MinGW\bin\gcc.exe
 python -m unittest discover -s tests -p 'test_*.py'
+python tests/mpu_driver/run.py --project . --compiler C:\MinGW\bin\gcc.exe
 .\tools\idf.ps1 -Action build
 & C:\Espressif\python_env\idf5.3_py3.11_env\Scripts\python.exe .\tools\analyze.py
 ```
@@ -72,6 +76,14 @@ image-size bounds, app alignment, no partition overlap, both OTA slots and exact
 16 MiB flash bounds. See OTA.md for the publication/maintenance contract.
 
 ## Required bench tests before use/release
+
+The sensor identity/configuration/calibration subset has now been exercised on
+COM12. The original INVALID_RESPONSE was the rejected 0x70 identity. After the
+MPU6500-specific profile was flashed, the repeated IMU errors disappeared and a
+short BOOT press produced `Neutral position recentered`, proving motion.ready
+was true after calibration. BLE logs still show pairing error 0x66; full host
+mouse behavior and OTA power-loss/rollback tests remain outstanding. See
+SENSOR_DIAGNOSTICS.md for evidence and the hardware-reset coordination rule.
 
 - Confirm rails and I2C pull-ups; verify address 0x68/0x69 and chip ID 0x68.
 - Check sensor axis orientation, two-second stationary calibration and LEDs.

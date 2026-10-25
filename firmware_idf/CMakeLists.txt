@@ -3,6 +3,9 @@ cmake_minimum_required(VERSION 3.16)
 set(IDF_TARGET "esp32s3" CACHE STRING "Target MCU")
 set(COMPONENTS main)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+# A version-only edit must invalidate cached app/release metadata as well.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/version.txt")
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/version.txt" PROJECT_VER LIMIT_COUNT 1)
 project(esp_mouse)
 
