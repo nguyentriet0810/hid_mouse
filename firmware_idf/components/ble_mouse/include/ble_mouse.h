@@ -21,6 +21,14 @@ typedef struct
     bool connected;
     /** Encrypted, subscribed, connected and not suspended by the host. */
     bool ready;
+    /** Authentication succeeded for the active connection. */
+    bool encrypted;
+    /** Host enabled HID input notifications for the active connection. */
+    bool subscribed;
+    /** Host requested HID suspend. */
+    bool suspended;
+    /** Stack is applying transmit backpressure. */
+    bool congested;
     /** Changes on connection/disconnection so old button events can be dropped. */
     uint32_t generation;
 } ble_mouse_status_t;

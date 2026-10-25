@@ -96,6 +96,7 @@ ve migration, Wi-Fi, gesture giu hai nut chuot khi reset va GitHub Release.
 ```powershell
 .\tools\test-host.ps1 -Compiler C:\MinGW\bin\gcc.exe
 python .\tests\mpu_driver\run.py --project . --compiler C:\MinGW\bin\gcc.exe
+python .\tests\ble_ccc\run.py --project . --compiler C:\MinGW\bin\gcc.exe
 ```
 
 Xem `docs/MISRA.md` ve pham vi, cac ngoai le va phan viec can cong cu MISRA.
@@ -106,7 +107,9 @@ build theo flags cua Espressif. Khong co chung nhan MISRA hay Bluetooth SIG.
 ## Gioi han da biet
 
 - Giao thuc HID report mode; khong cung cap boot mouse protocol cho BIOS.
-- Chua test BLE/pairing/latency tren board that trong phien tao source.
+- Da tai hien loi reconnect BLE tren dien thoai: CCC bi xoa sau disconnect.
+  Ban 1.1.3 luu/restore CCC theo tung bond trong NVS. Xem
+  [BLE diagnostics](docs/BLE_DIAGNOSTICS.md) ve bang chung va ket qua bench.
 - Chuot theo goc nghieng, khong phai cam bien quang hoac chuot theo vi tri
   tuyet doi. Calibration/recenter va do nhay can tinh chinh theo cach lap MPU.
 - Khong co do pin trong schematic. BAS hien gia tri co dinh **99%** theo

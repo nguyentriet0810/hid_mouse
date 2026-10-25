@@ -3,7 +3,31 @@
 Date: 2026-10-25 (Asia/Bangkok).
 Target: ESP32-S3-WROOM-1-N16R8, MPU6050/MPU6500, schematic GPIO mapping.
 
-## Automated checks
+## BLE reconnect correction: version 1.1.3
+
+- Reproduced on 1.1.2: fresh pairing enabled the mouse, but retained-bond
+  reconnect restored encryption without a mouse CCC write; readiness stayed
+  false while motion generation continued. The source reset CCC on disconnect.
+- Version 1.1.3 adds per-bond CCC NVS persistence and authenticated restore.
+- Real CCC-store fault-injection tests: PASS, 12 groups, including peer/type
+  isolation, unsubscribe, missing/corrupt records, no redundant commit, and
+  propagation/cleanup of NVS open/get/set/commit failures.
+- ESP-IDF build: PASS with periodic diagnostics enabled; image 1,401,056 bytes.
+- GCC analyzer: PASS, all 10 current production translation units.
+- USB application-only flash: PASS, esptool hash verified, NVS preserved.
+- Phone fresh pairing: PASS; mouse CCC stored and report transmission verified.
+- Retained-bond reconnect: PASS; `fresh_keys=0 mouse=1 battery=1`, no mouse CCC
+  rewrite required, reports resumed and user confirmed motion/button behavior.
+- Board hardware RESET with retained phone bond: PASS; the same settings restored
+  from NVS, readiness returned and the user confirmed the mouse still worked.
+- Core/driver/Python regressions rerun on 1.1.3: PASS (19 / 14 / 4).
+- Production main also compiles with periodic diagnostics disabled; the flashed
+  bench image keeps diagnostics on. New CCC-store tests are part of CI.
+- Laptop, IRK/address-rotation, multiple-host bench and live OTA tests remain
+  unverified. CCC storage tests isolate peer identities; they do not emulate
+  a real radio or OS Bluetooth stack.
+
+## Previous baseline checks (version 1.1.1)
 
 | Check | Result |
 |---|---|
@@ -45,6 +69,7 @@ Reproduce from the firmware directory:
 .\tools\test-host.ps1 -Compiler C:\MinGW\bin\gcc.exe
 python -m unittest discover -s tests -p 'test_*.py'
 python tests/mpu_driver/run.py --project . --compiler C:\MinGW\bin\gcc.exe
+python tests/ble_ccc/run.py --project . --compiler C:\MinGW\bin\gcc.exe
 .\tools\idf.ps1 -Action build
 & C:\Espressif\python_env\idf5.3_py3.11_env\Scripts\python.exe .\tools\analyze.py
 ```
@@ -81,11 +106,12 @@ The sensor identity/configuration/calibration subset has now been exercised on
 COM12. The original INVALID_RESPONSE was the rejected 0x70 identity. After the
 MPU6500-specific profile was flashed, the repeated IMU errors disappeared and a
 short BOOT press produced `Neutral position recentered`, proving motion.ready
-was true after calibration. BLE logs still show pairing error 0x66; full host
-mouse behavior and OTA power-loss/rollback tests remain outstanding. See
+was true after calibration. Version 1.1.3 additionally passed the phone fresh-
+pairing, retained-bond reconnect and board-reset tests recorded above. Windows,
+complete mouse gesture coverage and OTA power-loss/rollback remain unverified. See
 SENSOR_DIAGNOSTICS.md for evidence and the hardware-reset coordination rule.
 
-- Confirm rails and I2C pull-ups; verify address 0x68/0x69 and chip ID 0x68.
+- Confirm rails and I2C pull-ups; verify address 0x68/0x69 and supported chip ID 0x68/0x70.
 - Check sensor axis orientation, two-second stationary calibration and LEDs.
 - Pair on the intended OS; inspect HIDS Report Map and encrypted CCC writes.
 - Verify motion, deadzone, recenter, click, right-click, double-click, drag,

@@ -18,6 +18,9 @@
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wundef"
 #include "esp_log.h"
+#include "esp_app_desc.h"
+#include "esp_heap_caps.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -34,6 +37,66 @@
 static const char * const TAG = "mouse_app";
 
 void app_main(void);
+
+/** Return a stable label for the boot reason without allocating memory. */
+static const char *reset_reason_name(esp_reset_reason_t reason)
+{
+    const char *name = "unrecognized";
+    switch (reason)
+    {
+        case ESP_RST_UNKNOWN:
+            name = "unknown";
+            break;
+        case ESP_RST_POWERON:
+            name = "poweron";
+            break;
+        case ESP_RST_EXT:
+            name = "ext";
+            break;
+        case ESP_RST_SW:
+            name = "sw";
+            break;
+        case ESP_RST_PANIC:
+            name = "panic";
+            break;
+        case ESP_RST_INT_WDT:
+            name = "int_wdt";
+            break;
+        case ESP_RST_TASK_WDT:
+            name = "task_wdt";
+            break;
+        case ESP_RST_WDT:
+            name = "wdt";
+            break;
+        case ESP_RST_DEEPSLEEP:
+            name = "deepsleep";
+            break;
+        case ESP_RST_BROWNOUT:
+            name = "brownout";
+            break;
+        case ESP_RST_SDIO:
+            name = "sdio";
+            break;
+        case ESP_RST_USB:
+            name = "usb";
+            break;
+        case ESP_RST_JTAG:
+            name = "jtag";
+            break;
+        case ESP_RST_EFUSE:
+            name = "efuse";
+            break;
+        case ESP_RST_PWR_GLITCH:
+            name = "pwr_glitch";
+            break;
+        case ESP_RST_CPU_LOCKUP:
+            name = "cpu_lockup";
+            break;
+        default:
+            break;
+    }
+    return name;
+}
 
 /** Compile-time menuconfig values translated into physical motion units. */
 static const mouse_motion_config_t s_motion_config = {
@@ -108,6 +171,13 @@ static void run_mouse(void)
     int64_t retry_at_us = 0;
     int64_t previous_sample_us = 0;
     int64_t last_send_warning_us = 0;
+#if defined(CONFIG_MOUSE_BLE_DIAGNOSTICS)
+    /* Task-owned counters wrap as unsigned values; they never gate operation. */
+    int64_t diagnostic_at_us = 0;
+    uint32_t accepted_reports = 0U;
+    uint32_t rejected_reports = 0U;
+    uint32_t movement_ticks = 0U;
+#endif
     /* A BLE session boundary must invalidate all pending clicks and held state. */
     uint32_t generation = UINT32_MAX;
     uint8_t read_failures = 0U;
@@ -233,6 +303,12 @@ static void run_mouse(void)
             }
             /* 5. Send only current-session data. Relative displacement accumulated
              * without a usable host must not jump the pointer after reconnection. */
+#if defined(CONFIG_MOUSE_BLE_DIAGNOSTICS)
+            if ((report.x != 0) || (report.y != 0) || (report.wheel != 0))
+            {
+                movement_ticks++;
+            }
+#endif
             if (!link.ready)
             {
                 mouse_motion_clear_residuals(&motion);
@@ -247,6 +323,9 @@ static void run_mouse(void)
                     const esp_err_t result = ble_mouse_send(&report);
                     if (result == ESP_OK)
                     {
+#if defined(CONFIG_MOUSE_BLE_DIAGNOSTICS)
+                        accepted_reports++;
+#endif
                         sent_buttons = report.buttons;
                         /* SDK acceptance is the queue checkpoint, not a delay or retry count. */
                         if (button_event)
@@ -254,13 +333,16 @@ static void run_mouse(void)
                             mouse_input_ack(&input);
                         }
                     }
-                    else if ((now_us - last_send_warning_us) >= INT64_C(2000000))
-                    {
-                        ESP_LOGW(TAG, "HID report pending: %s", esp_err_to_name(result));
-                        last_send_warning_us = now_us;
-                    }
                     else
                     {
+#if defined(CONFIG_MOUSE_BLE_DIAGNOSTICS)
+                        rejected_reports++;
+#endif
+                        if ((now_us - last_send_warning_us) >= INT64_C(2000000))
+                        {
+                            ESP_LOGW(TAG, "HID report pending: %s", esp_err_to_name(result));
+                            last_send_warning_us = now_us;
+                        }
                         /* Button edge stays queued for the next report tick. */
                     }
                 }
@@ -287,6 +369,25 @@ static void run_mouse(void)
                 ESP_LOGE(TAG, "LED update: %s", esp_err_to_name(led_result));
                 led_error_reported = true;
             }
+#if defined(CONFIG_MOUSE_BLE_DIAGNOSTICS)
+            if (now_us >= diagnostic_at_us)
+            {
+                /* A periodic line proves that the owning task is still running.
+                 * accepted counts SDK enqueue success, not delivery to the host. */
+                ESP_LOGI(TAG, "HID health: connected=%u encrypted=%u subscribed=%u suspended=%u congested=%u ready=%u",
+                    (unsigned int)link.connected, (unsigned int)link.encrypted,
+                    (unsigned int)link.subscribed, (unsigned int)link.suspended,
+                    (unsigned int)link.congested, (unsigned int)link.ready);
+                ESP_LOGI(TAG, "Runtime: imu=%u calibrated=%u keys=0x%02x movement=%lu accepted=%lu rejected=%lu internal_heap=%lu min_internal_heap=%lu reset=%s",
+                    (unsigned int)sensor_online, (unsigned int)motion.ready,
+                    (unsigned int)input.stable_keys, (unsigned long)movement_ticks,
+                    (unsigned long)accepted_reports, (unsigned long)rejected_reports,
+                    (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                    (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                    reset_reason_name(esp_reset_reason()));
+                diagnostic_at_us = now_us + INT64_C(10000000);
+            }
+#endif
             /* Delay against the previous wake time to avoid adding work duration
              * to every nominal 10 ms period. A missed deadline is not an API error. */
             (void)xTaskDelayUntil(&wake_tick, pdMS_TO_TICKS(LOOP_PERIOD_MS));
@@ -304,6 +405,9 @@ static void run_mouse(void)
  */
 void app_main(void)
 {
+    ESP_LOGI(TAG, "Firmware %s; boot reset=%s (%u)",
+        esp_app_get_description()->version, reset_reason_name(esp_reset_reason()),
+        (unsigned int)esp_reset_reason());
     const esp_err_t result = initialize();
     if (result == ESP_OK)
     {

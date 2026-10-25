@@ -6,6 +6,15 @@ config MOUSE_DEVICE_NAME
     help
         Name appears in the scan response. Keep it at most 20 ASCII characters.
 
+config MOUSE_BLE_DIAGNOSTICS
+    bool "Periodic BLE/HID runtime diagnostics"
+    default n
+    help
+        Log link/security/subscription flags, motion/report counters and
+        internal heap every ten seconds. Intended for bench diagnosis.
+        Reports counted as accepted have been queued by the SDK; host
+        receipt is not acknowledged by BLE notifications.
+
 config MOUSE_DEADZONE_DEGREES
     int "Neutral deadzone in degrees"
     range 1 30

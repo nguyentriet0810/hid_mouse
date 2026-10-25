@@ -11,6 +11,7 @@
  * because attribute creation and advertising-data configuration are asynchronous.
  */
 #include "ble_mouse.h"
+#include "ble_ccc_store.h"
 #include <stddef.h>
 #include <string.h>
 #pragma GCC diagnostic push
@@ -20,6 +21,7 @@
 #include "esp_gap_ble_api.h"
 #include "esp_gatts_api.h"
 #include "esp_log.h"
+#include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
@@ -97,6 +99,24 @@ typedef struct
     uint32_t generation;
 } connection_t;
 
+/* Only the SDK callback task owns this record and the bond lookup buffer.
+ * Shared main-task readiness remains separately protected by s_state_lock. */
+typedef struct
+{
+    bool active;
+    bool bonded;
+    bool new_keys;
+    bool mouse_written;
+    bool battery_written;
+    bool mouse_notify;
+    bool battery_notify;
+    uint8_t address[ESP_BD_ADDR_LEN];
+    uint8_t address_type;
+    ble_ccc_peer_t identity;
+} peer_t;
+
+static peer_t s_peer = {0};
+static esp_ble_bond_dev_t s_bond_scratch[CONFIG_BT_SMP_MAX_BONDS];
 static const char * const TAG = "ble_mouse";
 static StaticEventGroup_t s_init_storage;
 static EventGroupHandle_t s_init_events = NULL;
@@ -270,6 +290,169 @@ static void log_sdk_error(const char * const operation, esp_err_t result)
     }
 }
 
+/** Compare SDK bond identities without treating public/random address spaces alike. */
+static bool same_identity(const ble_ccc_peer_t * const left,
+                          const ble_ccc_peer_t * const right)
+{
+    return (left->address_type == right->address_type) &&
+        (memcmp(left->address, right->address, sizeof(left->address)) == 0);
+}
+
+/**
+ * Resolve only addresses already present in the SDK's bond database. Bluedroid
+ * maps a resolved private address back to its stored pseudo address; PID keys
+ * provide the stable public/static identity for our NVS key. No "last host"
+ * fallback is allowed. The static scratch buffer avoids overflowing BTC's stack.
+ */
+static bool bonded_identity(const uint8_t address[ESP_BD_ADDR_LEN],
+                            uint8_t address_type, ble_ccc_peer_t * const identity)
+{
+    bool found = false;
+    int count = esp_ble_get_bond_device_num();
+    (void)memset(s_bond_scratch, 0, sizeof(s_bond_scratch));
+    if ((count > 0) && (count <= CONFIG_BT_SMP_MAX_BONDS))
+    {
+        const esp_err_t result = esp_ble_get_bond_device_list(&count, s_bond_scratch);
+        if (result == ESP_OK)
+        {
+            for (int index = 0; (index < count) && (index < CONFIG_BT_SMP_MAX_BONDS) && (!found); index++)
+            {
+                const esp_ble_bond_dev_t * const bond = &s_bond_scratch[index];
+                const bool has_identity =
+                    (bond->bond_key.key_mask & ESP_BLE_ID_KEY_MASK) != 0U;
+                if ((memcmp(address, bond->bd_addr, ESP_BD_ADDR_LEN) == 0) ||
+                    (has_identity && (memcmp(address,
+                        bond->bond_key.pid_key.static_addr, ESP_BD_ADDR_LEN) == 0)))
+                {
+                    const uint8_t * const stable_address = has_identity ?
+                        bond->bond_key.pid_key.static_addr : bond->bd_addr;
+                    (void)memcpy(identity->address, stable_address, ESP_BD_ADDR_LEN);
+                    identity->address_type = has_identity ?
+                        ((uint8_t)bond->bond_key.pid_key.addr_type & UINT8_C(1)) :
+                        (address_type & UINT8_C(1));
+                    found = true;
+                }
+            }
+        }
+        else
+        {
+            log_sdk_error("Read bond identities", result);
+        }
+    }
+    /* Do not retain an extra application copy of the SDK's keys after lookup. */
+    (void)memset(s_bond_scratch, 0, sizeof(s_bond_scratch));
+    return found;
+}
+
+/** Called from serialized BLE callbacks; never from the application's main task. */
+static bool current_connection(uint16_t connection_id)
+{
+    bool current;
+    portENTER_CRITICAL(&s_state_lock);
+    current = s_connection.connected && (s_connection.connection_id == connection_id);
+    portEXIT_CRITICAL(&s_state_lock);
+    return current;
+}
+
+/** Update the two shared attribute values for this single active connection. */
+static void apply_ccc_attributes(void)
+{
+    s_ccc[0] = s_peer.mouse_notify ? 1U : 0U;
+    s_ccc[1] = 0U;
+    s_battery_ccc[0] = s_peer.battery_notify ? 1U : 0U;
+    s_battery_ccc[1] = 0U;
+    log_sdk_error("Set mouse subscription", esp_ble_gatts_set_attr_value(
+        s_hid_handles[HID_REPORT_CCC], sizeof(s_ccc), s_ccc));
+    log_sdk_error("Set battery subscription", esp_ble_gatts_set_attr_value(
+        s_battery_handles[BATTERY_LEVEL_CCC], sizeof(s_battery_ccc), s_battery_ccc));
+}
+
+/** Persist accepted writes only for a currently authenticated SDK bond. */
+static void save_subscriptions(void)
+{
+    if (s_peer.bonded)
+    {
+        const uint8_t flags = (s_peer.mouse_notify ? BLE_CCC_MOUSE : 0U) |
+                              (s_peer.battery_notify ? BLE_CCC_BATTERY : 0U);
+        log_sdk_error("Persist bonded subscriptions",
+            ble_ccc_store_save(&s_peer.identity, flags));
+    }
+}
+
+/**
+ * Authenticate the active peer, then restore only that bond's CCC settings.
+ * Fresh key exchange starts with defaults; an explicit write on this link takes
+ * precedence over storage. No notifications are permitted before authentication.
+ */
+static void handle_authentication(const esp_ble_auth_cmpl_t * const authentication)
+{
+    ble_ccc_peer_t identity = {0};
+    const bool bonded = authentication->success &&
+        bonded_identity(authentication->bd_addr, (uint8_t)authentication->addr_type,
+                        &identity);
+    bool address_matches = memcmp(authentication->bd_addr, s_peer.address,
+                                  ESP_BD_ADDR_LEN) == 0;
+    if ((!address_matches) && bonded)
+    {
+        ble_ccc_peer_t active_identity = {0};
+        address_matches = bonded_identity(s_peer.address, s_peer.address_type,
+            &active_identity) && same_identity(&identity, &active_identity);
+    }
+    if (s_peer.active && address_matches)
+    {
+        if (authentication->success)
+        {
+            uint8_t flags = 0U;
+            s_peer.bonded = bonded &&
+                (((uint8_t)authentication->auth_mode & UINT8_C(1)) != 0U);
+            s_peer.identity = identity;
+            if (s_peer.bonded && (!s_peer.new_keys))
+            {
+                const esp_err_t result = ble_ccc_store_load(&identity, &flags);
+                if ((result != ESP_OK) && (result != ESP_ERR_NVS_NOT_FOUND))
+                {
+                    log_sdk_error("Restore bonded subscriptions", result);
+                }
+            }
+            if (!s_peer.mouse_written)
+            {
+                s_peer.mouse_notify = (flags & BLE_CCC_MOUSE) != 0U;
+            }
+            if (!s_peer.battery_written)
+            {
+                s_peer.battery_notify = (flags & BLE_CCC_BATTERY) != 0U;
+            }
+            apply_ccc_attributes();
+            portENTER_CRITICAL(&s_state_lock);
+            s_connection.encrypted = true;
+            s_connection.subscribed = s_peer.mouse_notify;
+            portEXIT_CRITICAL(&s_state_lock);
+            save_subscriptions();
+            ESP_LOGI(TAG, "Encrypted BLE connection established; auth_mode=0x%02x",
+                (unsigned int)authentication->auth_mode);
+            ESP_LOGI(TAG, "Bond subscriptions: bonded=%u fresh_keys=%u mouse=%u battery=%u",
+                (unsigned int)s_peer.bonded, (unsigned int)s_peer.new_keys,
+                (unsigned int)s_peer.mouse_notify, (unsigned int)s_peer.battery_notify);
+        }
+        else
+        {
+            portENTER_CRITICAL(&s_state_lock);
+            s_connection.encrypted = false;
+            s_connection.subscribed = false;
+            portEXIT_CRITICAL(&s_state_lock);
+            s_peer.bonded = false;
+            ESP_LOGE(TAG, "Pairing failed: 0x%02x", (unsigned int)authentication->fail_reason);
+            esp_bd_addr_t address;
+            (void)memcpy(address, s_peer.address, sizeof(address));
+            log_sdk_error("Disconnect after pairing failure", esp_ble_gap_disconnect(address));
+        }
+    }
+    else
+    {
+        ESP_LOGW(TAG, "Ignoring authentication event outside the active peer session");
+    }
+}
+
 /** Publish one asynchronous startup result to the application task. */
 static void complete_initialization(esp_err_t result, EventBits_t bit)
 {
@@ -315,25 +498,28 @@ static void gap_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *p
                              (unsigned int)param->adv_start_cmpl.status);
                 }
                 break;
+            case ESP_GAP_BLE_UPDATE_CONN_PARAMS_EVT:
+                ESP_LOGI(TAG, "Connection parameters: status=%u interval=%u latency=%u timeout=%u",
+                    (unsigned int)param->update_conn_params.status,
+                    (unsigned int)param->update_conn_params.conn_int,
+                    (unsigned int)param->update_conn_params.latency,
+                    (unsigned int)param->update_conn_params.timeout);
+                break;
             case ESP_GAP_BLE_SEC_REQ_EVT:
                 log_sdk_error("Security response", esp_ble_gap_security_rsp(
                     param->ble_security.ble_req.bd_addr, true));
                 break;
+            case ESP_GAP_BLE_KEY_EVT:
+                /* Keys are emitted for fresh pairing, not normal bond reuse.
+                 * Discard old CCC persistence for the new security association. */
+                if (s_peer.active && (memcmp(s_peer.address,
+                    param->ble_security.ble_key.bd_addr, ESP_BD_ADDR_LEN) == 0))
+                {
+                    s_peer.new_keys = true;
+                }
+                break;
             case ESP_GAP_BLE_AUTH_CMPL_EVT:
-                portENTER_CRITICAL(&s_state_lock);
-                s_connection.encrypted = param->ble_security.auth_cmpl.success;
-                portEXIT_CRITICAL(&s_state_lock);
-                if (param->ble_security.auth_cmpl.success)
-                {
-                    ESP_LOGI(TAG, "Encrypted BLE connection established");
-                }
-                else
-                {
-                    ESP_LOGE(TAG, "Pairing failed: 0x%02x",
-                        (unsigned int)param->ble_security.auth_cmpl.fail_reason);
-                    log_sdk_error("Disconnect after pairing failure", esp_ble_gap_disconnect(
-                        param->ble_security.auth_cmpl.bd_addr));
-                }
+                handle_authentication(&param->ble_security.auth_cmpl);
                 break;
             default:
                 break;
@@ -344,6 +530,12 @@ static void gap_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *p
 /** Start a fresh session, request a responsive interval and initiate encryption. */
 static void handle_connection(const esp_ble_gatts_cb_param_t * const param)
 {
+    /* Advertising stops on connect, so one peer owns the attribute CCC values. */
+    (void)memset(&s_peer, 0, sizeof(s_peer));
+    s_peer.active = true;
+    s_peer.address_type = (uint8_t)param->connect.ble_addr_type;
+    (void)memcpy(s_peer.address, param->connect.remote_bda, ESP_BD_ADDR_LEN);
+    apply_ccc_attributes();
     esp_ble_conn_update_params_t parameters = {0};
     (void)memcpy(parameters.bda, param->connect.remote_bda, ESP_BD_ADDR_LEN);
     parameters.min_int = 8U;   /* 10 ms; the central chooses the final interval. */
@@ -361,6 +553,11 @@ static void handle_connection(const esp_ble_gatts_cb_param_t * const param)
      * to a new host session; the application observes this separate epoch. */
     s_connection.generation++;
     portEXIT_CRITICAL(&s_state_lock);
+    ESP_LOGI(TAG, "BLE link connected: id=%u interval=%u latency=%u timeout=%u",
+        (unsigned int)param->connect.conn_id,
+        (unsigned int)param->connect.conn_params.interval,
+        (unsigned int)param->connect.conn_params.latency,
+        (unsigned int)param->connect.conn_params.timeout);
     log_sdk_error("Connection interval request", esp_ble_gap_update_conn_params(&parameters));
     /* API takes a mutable address; the vendor callback's address is mutable. */
     esp_bd_addr_t address;
@@ -375,7 +572,13 @@ static void handle_connection(const esp_ble_gatts_cb_param_t * const param)
  */
 static void handle_write(const esp_ble_gatts_cb_param_t * const param)
 {
-    if ((!param->write.is_prep) && (param->write.offset == 0U))
+    /* Log metadata only: attribute values can contain host-specific data. */
+    ESP_LOGI(TAG, "GATT write: connection=%u handle=0x%04x length=%u offset=%u prepared=%u",
+        (unsigned int)param->write.conn_id, (unsigned int)param->write.handle,
+        (unsigned int)param->write.len, (unsigned int)param->write.offset,
+        (unsigned int)param->write.is_prep);
+    if (current_connection(param->write.conn_id) && (param->write.value != NULL) &&
+        (!param->write.is_prep) && (param->write.offset == 0U))
     {
         if ((param->write.handle == s_hid_handles[HID_REPORT_CCC]) &&
             (param->write.len == 2U))
@@ -384,10 +587,21 @@ static void handle_write(const esp_ble_gatts_cb_param_t * const param)
              * malformed values do not enable this notification-only report. */
             const bool subscribed = (param->write.value[0] == 1U) &&
                                     (param->write.value[1] == 0U);
+            s_peer.mouse_notify = subscribed;
+            s_peer.mouse_written = true;
+            save_subscriptions();
             portENTER_CRITICAL(&s_state_lock);
             s_connection.subscribed = subscribed;
             portEXIT_CRITICAL(&s_state_lock);
             ESP_LOGI(TAG, "Mouse notifications %s", subscribed ? "enabled" : "disabled");
+        }
+        else if ((param->write.handle == s_battery_handles[BATTERY_LEVEL_CCC]) &&
+                 (param->write.len == 2U))
+        {
+            s_peer.battery_notify = (param->write.value[0] == 1U) &&
+                                   (param->write.value[1] == 0U);
+            s_peer.battery_written = true;
+            save_subscriptions();
         }
         else if ((param->write.handle == s_hid_handles[HID_CONTROL_VALUE]) &&
                  (param->write.len == 1U) && (param->write.value[0] <= 1U))
@@ -395,6 +609,8 @@ static void handle_write(const esp_ble_gatts_cb_param_t * const param)
             portENTER_CRITICAL(&s_state_lock);
             s_connection.suspended = (param->write.value[0] == 0U);
             portEXIT_CRITICAL(&s_state_lock);
+            ESP_LOGI(TAG, "HID control: %s",
+                (param->write.value[0] == 0U) ? "suspended" : "resumed");
         }
         else
         {
@@ -503,21 +719,29 @@ static void gatts_callback(esp_gatts_cb_event_t event, esp_gatt_if_t interface,
                 handle_connection(param);
                 break;
             case ESP_GATTS_DISCONNECT_EVT:
-                /* Invalidate application events before allowing discovery of
-                 * another session. A new peer must explicitly subscribe again. */
+                /* Clear live state, retaining per-bond CCC persistence. The
+                 * next authenticated peer restores only its own configuration. */
                 portENTER_CRITICAL(&s_state_lock);
                 s_connection.connected = false;
                 s_connection.encrypted = false;
                 s_connection.subscribed = false;
                 s_connection.generation++;
                 portEXIT_CRITICAL(&s_state_lock);
-                s_ccc[0] = 0U;
-                s_ccc[1] = 0U;
-                log_sdk_error("Reset subscription", esp_ble_gatts_set_attr_value(
-                    s_hid_handles[HID_REPORT_CCC], sizeof(s_ccc), s_ccc));
+                (void)memset(&s_peer, 0, sizeof(s_peer));
+                apply_ccc_attributes();
                 log_sdk_error("Restart advertising", esp_ble_gap_start_advertising(&s_advertising));
                 ESP_LOGI(TAG, "Disconnected, reason 0x%02x",
                          (unsigned int)param->disconnect.reason);
+                break;
+            case ESP_GATTS_MTU_EVT:
+                ESP_LOGI(TAG, "GATT MTU: connection=%u bytes=%u",
+                    (unsigned int)param->mtu.conn_id, (unsigned int)param->mtu.mtu);
+                break;
+            case ESP_GATTS_READ_EVT:
+                /* AUTO_RSP remains the sole response owner. */
+                ESP_LOGI(TAG, "GATT read: connection=%u handle=0x%04x offset=%u",
+                    (unsigned int)param->read.conn_id, (unsigned int)param->read.handle,
+                    (unsigned int)param->read.offset);
                 break;
             case ESP_GATTS_WRITE_EVT:
                 handle_write(param);
@@ -656,6 +880,11 @@ esp_err_t ble_mouse_init(void)
             }
             else
             {
+                ESP_LOGI(TAG, "HID handles: service=0x%04x map=0x%04x input=0x%04x ccc=0x%04x",
+                    (unsigned int)s_hid_handles[HID_SERVICE],
+                    (unsigned int)s_hid_handles[HID_MAP_VALUE],
+                    (unsigned int)s_hid_handles[HID_REPORT_VALUE],
+                    (unsigned int)s_hid_handles[HID_REPORT_CCC]);
                 result = esp_ble_gap_start_advertising(&s_advertising);
             }
         }
@@ -672,6 +901,10 @@ ble_mouse_status_t ble_mouse_status(void)
     status.connected = s_connection.connected;
     status.ready = s_connection.connected && s_connection.encrypted &&
                    s_connection.subscribed && (!s_connection.suspended);
+    status.encrypted = s_connection.encrypted;
+    status.subscribed = s_connection.subscribed;
+    status.suspended = s_connection.suspended;
+    status.congested = s_connection.congested;
     status.generation = s_connection.generation;
     portEXIT_CRITICAL(&s_state_lock);
     return status;

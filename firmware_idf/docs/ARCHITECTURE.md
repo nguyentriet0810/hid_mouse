@@ -75,7 +75,19 @@ Advertising data contains HID UUID and mouse appearance; complete device name
 is in the scan response to stay inside the 31-byte advertising limit.
 Pairing uses Secure Connections bonding with no-I/O Just Works; reports require
 an encrypted connection, enabled notifications and a non-suspended host.
-Bluetooth keys are stored by the SDK in NVS.
+Bluetooth keys are stored by the SDK in NVS. The private ble_ccc_store adapter
+stores versioned mouse/battery notification bits per public/static identity
+in a separate hid_ccc NVS namespace. Only an authenticated peer found in the
+SDK bond database may restore those bits. Fresh key exchange resets the old
+association to defaults; explicit current-link CCC writes take precedence.
+Disconnect clears live readiness and attribute values, but retains the bond
+record so a cached host need not write the mouse CCC again on reconnect.
+Canonical identities come from the SDK bond/PID data; no last-host fallback
+or application copy of pairing keys is stored. NVS errors are logged and
+restoration fails closed. A local CCC-store failure does not erase NVS.
+The first upgrade from firmware without CCC persistence requires one fresh
+pairing, because the old subscription cannot be inferred safely.
+See BLE_DIAGNOSTICS.md for the reproduced failure and hardware results.
 
 BAS is an explicitly configured development placeholder because this board has
 no battery-sense input. It does not estimate remaining charge. PnP identity must

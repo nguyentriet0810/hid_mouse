@@ -9,7 +9,7 @@ appropriate checker, project configuration, whole-program analysis, manual
 reviews, and approval of individual deviations. Those steps are not replaced
 by a clean compiler build or passing unit tests.
 
-Production scope: `main/*.c`, `components/*/*.c`, and their public headers.
+Production scope: `main/*.c`, `components/*/*.c`, and their public/private headers.
 Third-party scope: ESP-IDF, FreeRTOS, compiler runtime and system headers.
 Build tools, host tests and generated code are outside production scope.
 
@@ -44,7 +44,7 @@ Build tools, host tests and generated code are outside production scope.
 | D-05 | Tick/millisecond wraparound; rule 12.4 review | Unsigned runtime subtraction intentionally uses modulo arithmetic for elapsed timers. Host tests cover UINT32_MAX rollover. No constant-expression wraparound is intentional. |
 | D-06 | External app_main and vendor callback signatures; rules 8.4/8.13 review | app_main has an explicit prototype. Callback parameter types are imposed by the SDK. Read-only helpers use const-qualified pointed-to data. |
 | D-07 | FreeRTOS/SDK memory lifecycle; directive 4.12 review | Application contexts and event-group storage are static or automatic. SDK I2C/Bluetooth initialization allocates internally; failure is handled at startup. This is not a claim of heap-free whole-system operation. |
-| D-08 | Deliberately ignored results; rule 17.7 review | `(void)` only for APIs whose result is intentionally unused: memcpy's destination, event-group bit snapshots on mutation, and delay-until's timing status. Error-bearing vendor calls are checked or logged. |
+| D-08 | Deliberately ignored results; rule 17.7 review | `(void)` only for APIs whose result is intentionally unused: memory-copy/clear return values, event-group bit snapshots on mutation, and delay-until's timing status. Error-bearing vendor calls are checked or logged. |
 | D-09 | OTA URL formatting and SDK byte streams; rule 21.6 and representation-cast review | snprintf uses literal formats, fixed buffers and checked lengths. HTTP char buffers view uint8_t object representations. No stdio/heap in ota_policy. TLS/HTTP/NVS allocation is owned by the vendor adapters and checked/cleaned up. |
 
 Vendor headers use undefined CONFIG macros as zero. A GCC diagnostic push/pop
