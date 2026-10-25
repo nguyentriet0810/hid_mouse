@@ -1,6 +1,15 @@
 /* SPDX-License-Identifier: MIT
  * ESP-IDF boundary adapter. See docs/MISRA.md for SDK-specific deviations.
  */
+/**
+ * @file ble_mouse.c
+ * @brief Report-mode HID-over-GATT server and its connection state machine.
+ *
+ * GAP/GATT callbacks run in SDK task context while the main task sends reports.
+ * Only the small connection record is shared under a spinlock; SDK calls never
+ * execute while that lock is held. Initialization uses a separate event group
+ * because attribute creation and advertising-data configuration are asynchronous.
+ */
 #include "ble_mouse.h"
 #include <stddef.h>
 #include <string.h>
@@ -17,6 +26,8 @@
 #include "sdkconfig.h"
 #pragma GCC diagnostic pop
 
+/* Advertising must wait for both payloads and all three GATT services. A single
+ * failure bit makes callback errors visible to the bounded initialization wait. */
 #define INIT_ADV_BIT BIT0
 #define INIT_SCAN_BIT BIT1
 #define INIT_HID_BIT BIT2
@@ -29,6 +40,8 @@
 #define BATTERY_SERVICE_INSTANCE UINT8_C(2)
 #define MOUSE_REPORT_ID UINT8_C(1)
 
+/* Attribute indexes must match the designated entries in s_hid_database. The
+ * SDK fills handle arrays in this same order after table creation succeeds. */
 typedef enum
 {
     HID_SERVICE = 0,
@@ -68,12 +81,19 @@ typedef enum
 
 typedef struct
 {
+    /** Link-layer connection exists, independently of pairing readiness. */
     bool connected;
+    /** Authentication completed successfully for the current link. */
     bool encrypted;
+    /** Host enabled the input-report CCC descriptor, not the battery CCC. */
     bool subscribed;
+    /** Host HID control point requested suspend (0) rather than resume (1). */
     bool suspended;
+    /** SDK transmit congestion temporarily prevents accepting a new report. */
     bool congested;
+    /** Current GATT connection identifier; only use with a synchronized snapshot. */
     uint16_t connection_id;
+    /** Session epoch; lets the application invalidate queued events after reconnect. */
     uint32_t generation;
 } connection_t;
 
@@ -82,6 +102,8 @@ static StaticEventGroup_t s_init_storage;
 static EventGroupHandle_t s_init_events = NULL;
 static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static connection_t s_connection = {0};
+/* The interface and attribute handles are established before init returns and
+ * then remain fixed for this single-instance server's lifetime. */
 static esp_gatt_if_t s_interface = ESP_GATT_IF_NONE;
 static uint16_t s_hid_handles[HID_ATTRIBUTE_COUNT];
 static uint16_t s_info_handles[INFO_ATTRIBUTE_COUNT];
@@ -107,6 +129,8 @@ static uint16_t s_battery_level_uuid = UINT16_C(0x2A19);
 static uint8_t s_property_read = ESP_GATT_CHAR_PROP_BIT_READ;
 static uint8_t s_property_write = ESP_GATT_CHAR_PROP_BIT_WRITE_NR;
 static uint8_t s_property_notify = ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_NOTIFY;
+/* HID 1.11, no country code, normally connectable. Boot protocol is not exposed;
+ * hosts use the Report Map and the input Report Reference characteristic. */
 static uint8_t s_hid_information[4] = {0x11U, 0x01U, 0x00U, 0x02U};
 static uint8_t s_control[1] = {0x01U};
 static uint8_t s_report[4] = {0U};
@@ -124,6 +148,10 @@ static uint8_t s_pnp[7] = {
     0x01U, 0x00U, /* Product 0x0001. */
     0x00U, 0x01U  /* Version 0x0100. */
 };
+/* Report ID 1 describes four payload bytes:
+ *   [0] left/right/middle bits + five padding bits
+ *   [1] relative X, [2] relative Y, [3] relative wheel, each -127..127.
+ * The ID is carried by the GATT Report Reference, not prefixed to that payload. */
 static uint8_t s_report_map[] = {
     0x05U, 0x01U,       /* Generic Desktop */
     0x09U, 0x02U,       /* Mouse */
@@ -132,16 +160,16 @@ static uint8_t s_report_map[] = {
     0x09U, 0x01U,       /* Pointer */
     0xA1U, 0x00U,       /* Physical collection */
     0x05U, 0x09U,       /* Buttons */
-    0x19U, 0x01U, 0x29U, 0x03U,
+    0x19U, 0x01U, 0x29U, 0x03U, /* Button usages 1..3. */
     0x15U, 0x00U, 0x25U, 0x01U,
-    0x95U, 0x03U, 0x75U, 0x01U, 0x81U, 0x02U,
-    0x95U, 0x01U, 0x75U, 0x05U, 0x81U, 0x03U,
+    0x95U, 0x03U, 0x75U, 0x01U, 0x81U, 0x02U, /* Three one-bit absolute button states. */
+    0x95U, 0x01U, 0x75U, 0x05U, 0x81U, 0x03U, /* Pad the remaining five bits. */
     0x05U, 0x01U,
     0x09U, 0x30U,       /* X */
     0x09U, 0x31U,       /* Y */
     0x09U, 0x38U,       /* Wheel */
-    0x15U, 0x81U, 0x25U, 0x7FU,
-    0x75U, 0x08U, 0x95U, 0x03U, 0x81U, 0x06U,
+    0x15U, 0x81U, 0x25U, 0x7FU, /* Signed logical range -127..127. */
+    0x75U, 0x08U, 0x95U, 0x03U, 0x81U, 0x06U, /* Three eight-bit relative values. */
     0xC0U, 0xC0U
 };
 
@@ -150,6 +178,9 @@ static uint8_t s_report_map[] = {
     {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&(uuid_object), \
       (permission), (maximum), (length), (uint8_t *)(pointer)}}
 
+/* AUTO_RSP lets the SDK serve the configured attribute values. The application
+ * separately interprets accepted CCC/control writes to gate notification sends.
+ * Sensitive HID values and descriptors require an encrypted connection. */
 static const esp_gatts_attr_db_t s_hid_database[HID_ATTRIBUTE_COUNT] = {
     [HID_SERVICE] = ATTRIBUTE(s_primary_uuid, ESP_GATT_PERM_READ,
         2U, 2U, &s_hid_uuid),
@@ -176,6 +207,8 @@ static const esp_gatts_attr_db_t s_hid_database[HID_ATTRIBUTE_COUNT] = {
         sizeof(s_reference), sizeof(s_reference), s_reference)
 };
 
+/* DIS supplies readable model/manufacturer/PnP identity without inventing a
+ * production vendor assignment; the default vendor ID is a development value. */
 static const esp_gatts_attr_db_t s_info_database[INFO_ATTRIBUTE_COUNT] = {
     [INFO_SERVICE] = ATTRIBUTE(s_primary_uuid, ESP_GATT_PERM_READ, 2U, 2U, &s_info_uuid),
     [INFO_MANUFACTURER_DECLARATION] = ATTRIBUTE(s_declaration_uuid, ESP_GATT_PERM_READ,
@@ -192,6 +225,8 @@ static const esp_gatts_attr_db_t s_info_database[INFO_ATTRIBUTE_COUNT] = {
         sizeof(s_pnp), sizeof(s_pnp), s_pnp)
 };
 
+/* BAS is present for HID host discovery. Its configured level is a fixed
+ * development placeholder because the schematic has no battery measurement. */
 static const esp_gatts_attr_db_t s_battery_database[BATTERY_ATTRIBUTE_COUNT] = {
     [BATTERY_SERVICE] = ATTRIBUTE(s_primary_uuid, ESP_GATT_PERM_READ,
         2U, 2U, &s_battery_uuid),
@@ -204,6 +239,7 @@ static const esp_gatts_attr_db_t s_battery_database[BATTERY_ATTRIBUTE_COUNT] = {
         sizeof(s_battery_ccc), sizeof(s_battery_ccc), s_battery_ccc)
 };
 
+/* Advertising intervals use 0.625 ms units: 0x30..0x60 means 30..60 ms. */
 static esp_ble_adv_params_t s_advertising = {
     .adv_int_min = 0x30U,
     .adv_int_max = 0x60U,
@@ -217,12 +253,15 @@ static uint8_t s_advertisement[] = {
     0x03U, 0x03U, 0x12U, 0x18U,      /* Complete list: HID UUID 0x1812. */
     0x03U, 0x19U, 0xC2U, 0x03U       /* Appearance: mouse 0x03C2. */
 };
+/* Put the full name in the scan response so the primary advertising packet can
+ * retain HID UUID/appearance without exceeding the legacy 31-byte limit. */
 static esp_ble_adv_data_t s_scan_response = {
     .set_scan_rsp = true,
     .include_name = true,
     .include_txpower = false
 };
 
+/** Log a callback-side SDK failure without replacing the caller's result. */
 static void log_sdk_error(const char * const operation, esp_err_t result)
 {
     if (result != ESP_OK)
@@ -231,6 +270,7 @@ static void log_sdk_error(const char * const operation, esp_err_t result)
     }
 }
 
+/** Publish one asynchronous startup result to the application task. */
 static void complete_initialization(esp_err_t result, EventBits_t bit)
 {
     if (result == ESP_OK)
@@ -244,6 +284,12 @@ static void complete_initialization(esp_err_t result, EventBits_t bit)
     }
 }
 
+/**
+ * Handle advertising setup and pairing results in SDK callback context.
+ *
+ * A physical connection is insufficient for sending HID input: authentication
+ * must also succeed. Pairing failure explicitly disconnects that peer.
+ */
 static void gap_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
 {
     if (param != NULL)
@@ -295,14 +341,15 @@ static void gap_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *p
     }
 }
 
+/** Start a fresh session, request a responsive interval and initiate encryption. */
 static void handle_connection(const esp_ble_gatts_cb_param_t * const param)
 {
     esp_ble_conn_update_params_t parameters = {0};
     (void)memcpy(parameters.bda, param->connect.remote_bda, ESP_BD_ADDR_LEN);
     parameters.min_int = 8U;   /* 10 ms; the central chooses the final interval. */
-    parameters.max_int = 16U;
+    parameters.max_int = 16U;  /* 20 ms, in the same 1.25 ms connection units. */
     parameters.latency = 0U;
-    parameters.timeout = 400U;
+    parameters.timeout = 400U; /* Four-second supervision timeout, in 10 ms units. */
     portENTER_CRITICAL(&s_state_lock);
     s_connection.connected = true;
     s_connection.encrypted = false;
@@ -310,6 +357,8 @@ static void handle_connection(const esp_ble_gatts_cb_param_t * const param)
     s_connection.suspended = false;
     s_connection.congested = false;
     s_connection.connection_id = param->connect.conn_id;
+    /* Reusing a numeric connection ID must not make old click events belong
+     * to a new host session; the application observes this separate epoch. */
     s_connection.generation++;
     portEXIT_CRITICAL(&s_state_lock);
     log_sdk_error("Connection interval request", esp_ble_gap_update_conn_params(&parameters));
@@ -320,6 +369,10 @@ static void handle_connection(const esp_ble_gatts_cb_param_t * const param)
                    ESP_BLE_SEC_ENCRYPT_NO_MITM));
 }
 
+/**
+ * Interpret complete writes to the HID subscription/control descriptors.
+ * Prepared/offset writes and unrelated attributes never change readiness.
+ */
 static void handle_write(const esp_ble_gatts_cb_param_t * const param)
 {
     if ((!param->write.is_prep) && (param->write.offset == 0U))
@@ -327,6 +380,8 @@ static void handle_write(const esp_ble_gatts_cb_param_t * const param)
         if ((param->write.handle == s_hid_handles[HID_REPORT_CCC]) &&
             (param->write.len == 2U))
         {
+            /* CCC is little-endian 0x0001 for notifications. Indications and
+             * malformed values do not enable this notification-only report. */
             const bool subscribed = (param->write.value[0] == 1U) &&
                                     (param->write.value[1] == 0U);
             portENTER_CRITICAL(&s_state_lock);
@@ -348,6 +403,7 @@ static void handle_write(const esp_ble_gatts_cb_param_t * const param)
     }
 }
 
+/** Save only a table with the expected shape, then request its service start. */
 static void handle_attribute_table(const esp_ble_gatts_cb_param_t * const param)
 {
     esp_err_t result = ESP_FAIL;
@@ -382,6 +438,10 @@ static void handle_attribute_table(const esp_ble_gatts_cb_param_t * const param)
     }
 }
 
+/**
+ * Drive GATT registration/service startup and maintain per-link state.
+ * Attribute creation is not readiness: INIT_* is set only after service start.
+ */
 static void gatts_callback(esp_gatts_cb_event_t event, esp_gatt_if_t interface,
                            esp_ble_gatts_cb_param_t *param)
 {
@@ -443,6 +503,8 @@ static void gatts_callback(esp_gatts_cb_event_t event, esp_gatt_if_t interface,
                 handle_connection(param);
                 break;
             case ESP_GATTS_DISCONNECT_EVT:
+                /* Invalidate application events before allowing discovery of
+                 * another session. A new peer must explicitly subscribe again. */
                 portENTER_CRITICAL(&s_state_lock);
                 s_connection.connected = false;
                 s_connection.encrypted = false;
@@ -461,6 +523,8 @@ static void gatts_callback(esp_gatts_cb_event_t event, esp_gatt_if_t interface,
                 handle_write(param);
                 break;
             case ESP_GATTS_CONGEST_EVT:
+                /* Preserve logical readiness during temporary backpressure;
+                 * ble_mouse_send() refuses sends until the SDK clears it. */
                 portENTER_CRITICAL(&s_state_lock);
                 s_connection.congested = param->congest.congested;
                 portEXIT_CRITICAL(&s_state_lock);
@@ -471,6 +535,11 @@ static void gatts_callback(esp_gatts_cb_event_t event, esp_gatt_if_t interface,
     }
 }
 
+/**
+ * Configure Secure Connections bonding with no keyboard/display capabilities.
+ * This is Just Works pairing (no MITM passkey); encrypted-report permissions
+ * and the application readiness gate remain separate requirements.
+ */
 static esp_err_t configure_security(void)
 {
     esp_ble_auth_req_t authentication = ESP_LE_AUTH_REQ_SC_BOND;
@@ -502,6 +571,7 @@ static esp_err_t configure_security(void)
 esp_err_t ble_mouse_init(void)
 {
     esp_err_t result = ESP_ERR_INVALID_STATE;
+    /* The configured name is encoded into the scan response at startup. */
     const size_t name_length = strlen(CONFIG_MOUSE_DEVICE_NAME);
     if ((name_length == 0U) || (name_length > 20U))
     {
@@ -511,6 +581,8 @@ esp_err_t ble_mouse_init(void)
     {
         s_init_events = xEventGroupCreateStatic(&s_init_storage);
         result = (s_init_events != NULL) ? ESP_OK : ESP_ERR_NO_MEM;
+        /* Controller -> host -> callbacks -> security/data -> application
+         * registration. Later steps execute only after the prior one succeeds. */
         if (result == ESP_OK)
         {
             esp_bt_controller_config_t controller = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
@@ -558,7 +630,9 @@ esp_err_t ble_mouse_init(void)
         }
         if (result == ESP_OK)
         {
-            /* Finite wait, including explicit wake on any callback failure. */
+            /* Poll event bits with a finite ten-second deadline. Advertising
+             * starts only when every service and both advertising payloads are
+             * ready; one callback failure aborts this wait. */
             const TickType_t start = xTaskGetTickCount();
             EventBits_t bits = 0U;
             do
@@ -592,6 +666,8 @@ esp_err_t ble_mouse_init(void)
 ble_mouse_status_t ble_mouse_status(void)
 {
     ble_mouse_status_t status;
+    /* Copy the entire public view under one short lock to avoid mixing fields
+     * from two SDK callback updates. Never call the SDK while holding this lock. */
     portENTER_CRITICAL(&s_state_lock);
     status.connected = s_connection.connected;
     status.ready = s_connection.connected && s_connection.encrypted &&
@@ -610,13 +686,20 @@ esp_err_t ble_mouse_send(const mouse_report_t * const report)
         portENTER_CRITICAL(&s_state_lock);
         connection = s_connection;
         portEXIT_CRITICAL(&s_state_lock);
+        /* Snapshot first, then release the lock before entering the SDK. A
+         * disconnect can still race this call, so the SDK result is authoritative. */
         result = ESP_ERR_INVALID_STATE;
         if (connection.connected && connection.encrypted && connection.subscribed &&
             (!connection.suspended) && (!connection.congested))
         {
-            /* BLE report reference carries the ID; the value has exactly 4 bytes. */
+            /* BLE Report Reference carries the ID; the value has exactly four
+             * bytes. Explicit serialization avoids structure-padding dependence.
+             * Signed-to-unsigned conversion preserves each relative byte's
+             * two's-complement wire representation modulo 256. */
             uint8_t data[4] = {report->buttons, (uint8_t)report->x,
                                (uint8_t)report->y, (uint8_t)report->wheel};
+            /* false selects an unacknowledged notification, not an indication.
+             * On failure the caller retains the queued button edge for retry. */
             result = esp_ble_gatts_send_indicate(s_interface, connection.connection_id,
                 s_hid_handles[HID_REPORT_VALUE], sizeof(data), data, false);
         }

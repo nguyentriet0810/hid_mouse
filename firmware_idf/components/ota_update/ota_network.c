@@ -1,4 +1,12 @@
 /* SPDX-License-Identifier: MIT */
+/**
+ * @file ota_network.c
+ * @brief Private maintenance-mode networking with persistent Wi-Fi credentials,
+ *        certificate-validated HTTPS, explicit redirects and bounded body reads.
+ *
+ * The main task serializes these APIs. Wi-Fi event callbacks only request bounded
+ * reconnects and signal an event group; they never fetch firmware or write flash.
+ */
 #include "ota_network.h"
 #include <stdint.h>
 #include <limits.h>
@@ -24,20 +32,29 @@
 #define WIFI_RETRIES UINT8_C(5)
 
 static const char * const TAG = "ota_network";
+/* Statically backed event bits carry connection outcome from the ESP event task
+ * to the waiting main task; IP_EVENT_STA_GOT_IP is the usable-network checkpoint. */
 static StaticEventGroup_t s_event_storage;
 static EventGroupHandle_t s_events = NULL;
 static esp_netif_t *s_station = NULL;
 static esp_event_handler_instance_t s_wifi_handler;
 static esp_event_handler_instance_t s_ip_handler;
+/* Track successful acquisition stages so partial initialization can use the
+ * same teardown path without releasing objects the adapter never acquired. */
 static bool s_event_loop = false;
 static bool s_wifi_registered = false;
 static bool s_ip_registered = false;
 static bool s_wifi_initialized = false;
 static bool s_wifi_started = false;
 static bool s_sntp_initialized = false;
+/* Callback-owned attempt count; initialized before Wi-Fi starts and never reset
+ * on a reconnect, keeping the maintenance attempt bounded across disconnects. */
 static uint8_t s_retries = 0U;
+/* The synchronous HTTP header callback describes only the current response.
+ * open_https clears this before every request to avoid trusting a stale header. */
 static bool s_redirect_safe = false;
 
+/** @brief Retain cleanup diagnostics while allowing the remaining cleanup steps. */
 static void warn_result(const char * const operation, esp_err_t result)
 {
     if (result != ESP_OK)
@@ -46,6 +63,11 @@ static void warn_result(const char * const operation, esp_err_t result)
     }
 }
 
+/**
+ * @brief Bridge Wi-Fi/IP events to finite retries and the main task's wait bits.
+ * @note Runs in the SDK event task. Handler removal precedes event-group deletion
+ *       during teardown, and normal mouse operation does not register it.
+ */
 static void wifi_callback(void *argument, esp_event_base_t base,
                            int32_t event, void *event_data)
 {
@@ -77,6 +99,13 @@ static void wifi_callback(void *argument, esp_event_base_t base,
     }
 }
 
+/**
+ * @brief Load NVS credentials or persist bootstrap settings from local sdkconfig.
+ * @param[out] configuration Zero-initialized SDK Wi-Fi configuration to populate.
+ * @return ESP_OK only if the SSID/password fit the SDK fields and are available.
+ * @note Existing NVS settings normally take precedence over compile-time values
+ *       so credential-free GitHub firmware can reuse the network after OTA.
+ */
 static esp_err_t load_credentials(wifi_config_t * const configuration)
 {
     nvs_handle_t handle = 0U;
@@ -94,6 +123,8 @@ static esp_err_t load_credentials(wifi_config_t * const configuration)
         }
         bool initial_configuration = (result == ESP_ERR_NVS_NOT_FOUND);
 #if defined(CONFIG_MOUSE_OTA_WIFI_REPLACE_STORED)
+        /* An explicit local bootstrap option is needed to replace an existing
+         * network; an ordinary release must not silently overwrite saved data. */
         initial_configuration = true;
 #endif
         if (initial_configuration)
@@ -113,6 +144,8 @@ static esp_err_t load_credentials(wifi_config_t * const configuration)
                 }
                 if (result == ESP_OK)
                 {
+                    /* Commit only after both strings were accepted. No password
+                     * is logged or passed to GitHub requests. */
                     result = nvs_commit(handle);
                 }
             }
@@ -128,6 +161,8 @@ static esp_err_t load_credentials(wifi_config_t * const configuration)
             }
             else
             {
+                /* SDK arrays are fixed-width, not necessarily NUL-terminated when
+                 * filled to capacity. Zero initialization supplies shorter tails. */
                 (void)memcpy(configuration->sta.ssid, ssid, stored_ssid_length);
                 (void)memcpy(configuration->sta.password, password, stored_password_length);
             }
@@ -180,6 +215,8 @@ esp_err_t ota_network_connect(void)
     }
     if (result == ESP_OK)
     {
+        /* Credentials are managed by this component's NVS namespace, not the
+         * Wi-Fi driver's own flash persistence. OTA must preserve those settings. */
         result = esp_wifi_set_storage(WIFI_STORAGE_RAM);
     }
     if (result == ESP_OK)
@@ -198,6 +235,8 @@ esp_err_t ota_network_connect(void)
     }
     if (result == ESP_OK)
     {
+        /* Waiting for IP rather than association alone ensures HTTPS has an
+         * address; either failure signalling or the 30-second timeout can end it. */
         const EventBits_t bits = xEventGroupWaitBits(s_events,
             WIFI_CONNECTED_BIT | WIFI_FAILED_BIT, pdFALSE, pdFALSE, pdMS_TO_TICKS(30000U));
         result = ((bits & WIFI_CONNECTED_BIT) != 0U) ? ESP_OK : ESP_ERR_TIMEOUT;
@@ -218,6 +257,8 @@ esp_err_t ota_network_connect(void)
 
 void ota_network_disconnect(void)
 {
+    /* Teardown is used after success and every partial failure. It releases the
+     * maintenance transport but deliberately leaves NVS credentials untouched. */
     if (s_sntp_initialized)
     {
         esp_netif_sntp_deinit();
@@ -263,6 +304,11 @@ void ota_network_disconnect(void)
     }
 }
 
+/**
+ * @brief Inspect Location response headers without automatically following them.
+ * @return ESP_OK; the caller decides whether the recorded HTTPS location is safe
+ *         to use after it has also checked the HTTP status code.
+ */
 static esp_err_t header_callback(esp_http_client_event_t *event)
 {
     esp_err_t result = ESP_OK;
@@ -312,6 +358,8 @@ esp_err_t ota_network_open_https(const char * const url,
         bool opened = false;
         for (uint8_t attempt = 0U; (attempt < 6U) && (result == ESP_OK) && (!opened); ++attempt)
         {
+            /* Automatic redirects are disabled so an HTTPS-to-HTTP downgrade is
+             * rejected before a request can be sent to the redirected endpoint. */
             s_redirect_safe = false;
             result = esp_http_client_open(*client, 0);
             if (result == ESP_OK)
@@ -329,6 +377,9 @@ esp_err_t ota_network_open_https(const char * const url,
                 else if (((status == 301) || (status == 302) || (status == 303) ||
                           (status == 307) || (status == 308)) && s_redirect_safe)
                 {
+                    /* GitHub release assets move to CDN URLs. Accept those only
+                     * through a checked HTTPS Location and verify the SDK's
+                     * resulting transport before opening the next request. */
                     result = esp_http_client_set_redirection(*client);
                     if ((result == ESP_OK) &&
                         (esp_http_client_get_transport_type(*client) != HTTP_TRANSPORT_OVER_SSL))
@@ -371,6 +422,9 @@ esp_err_t ota_network_fetch(const char * const url, char * const output,
         const int64_t deadline = esp_timer_get_time() + INT64_C(30000000);
         while ((result == ESP_OK) && (!complete))
         {
+            /* Reserve one byte for the final terminator. Reaching the reserved
+             * boundary or deadline fails instead of truncating a manifest that
+             * might otherwise appear valid to the policy parser. */
             if ((received >= (capacity - 1U)) || (esp_timer_get_time() >= deadline))
             {
                 result = ESP_ERR_INVALID_SIZE;
@@ -385,6 +439,8 @@ esp_err_t ota_network_fetch(const char * const url, char * const output,
                 }
                 else if (count == 0)
                 {
+                    /* Distinguish a complete body from a stalled/truncated read;
+                     * partial metadata must never reach the manifest parser. */
                     complete = esp_http_client_is_complete_data_received(client);
                     result = complete ? ESP_OK : ESP_ERR_INVALID_RESPONSE;
                 }

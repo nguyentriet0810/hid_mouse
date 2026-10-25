@@ -1,4 +1,12 @@
 /* SPDX-License-Identifier: MIT */
+/**
+ * @file app_main.c
+ * @brief Single-task coordinator for the N16R8 BLE air mouse and OTA boot checks.
+ *
+ * The application task owns GPIO sampling, MPU access, filter state and button
+ * ordering. BLE callbacks communicate through status snapshots; they do not touch
+ * these task-local contexts. Startup maintenance completes before BLE is enabled.
+ */
 #include <stddef.h>
 #include <stdint.h>
 #include "ble_mouse.h"
@@ -17,7 +25,9 @@
 #include "sdkconfig.h"
 #pragma GCC diagnostic pop
 
+/** Nominal 100 Hz sampling/report opportunity; I2C calls retain their own timeouts. */
 #define LOOP_PERIOD_MS UINT32_C(10)
+/** Keep a missing sensor from monopolizing the bus or flooding the log. */
 #define SENSOR_RETRY_US INT64_C(2000000)
 #define MAX_READ_FAILURES UINT8_C(3)
 
@@ -25,6 +35,7 @@ static const char * const TAG = "mouse_app";
 
 void app_main(void);
 
+/** Compile-time menuconfig values translated into physical motion units. */
 static const mouse_motion_config_t s_motion_config = {
     .deadzone_degrees = (float)CONFIG_MOUSE_DEADZONE_DEGREES,
     .pixels_per_second_per_degree = (float)CONFIG_MOUSE_GAIN,
@@ -42,6 +53,14 @@ static const mouse_motion_config_t s_motion_config = {
 #endif
 };
 
+/**
+ * @brief Validate board hardware, initialize persistent storage, then start BLE.
+ * @return ESP_OK when normal mouse operation may start; otherwise a fatal startup error.
+ *
+ * Only the two documented recoverable NVS errors erase/recreate storage. This
+ * recovery also clears saved bonds/credentials. An OTA maintenance failure is
+ * logged but does not make the currently selected mouse firmware unusable.
+ */
 static esp_err_t initialize(void)
 {
     esp_err_t result = board_hal_init();
@@ -71,18 +90,28 @@ static esp_err_t initialize(void)
     return result;
 }
 
+/**
+ * @brief Own and schedule the sensor/input/report pipeline until reset.
+ *
+ * Healthy normal operation stays in this loop. A missing MPU suppresses motion
+ * while buttons and BLE continue; recovery reinitializes and recalibrates it.
+ * Each tick offers at most one report to the SDK. Button FIFO entries are removed
+ * only on SDK acceptance, whereas stale relative movement is not replayed later.
+ */
 static void run_mouse(void)
 {
     mpu6050_t sensor = {0};
     mouse_motion_t motion = {0};
     mouse_input_t input = {0};
     TickType_t wake_tick = xTaskGetTickCount();
+    /* Monotonic microsecond deadlines are separate from wrapping input milliseconds. */
     int64_t retry_at_us = 0;
     int64_t previous_sample_us = 0;
     int64_t last_send_warning_us = 0;
+    /* A BLE session boundary must invalidate all pending clicks and held state. */
     uint32_t generation = UINT32_MAX;
     uint8_t read_failures = 0U;
-    uint8_t sent_buttons = 0U;
+    uint8_t sent_buttons = 0U; /* Last button state accepted by the Bluetooth SDK. */
     bool sensor_online = false;
     bool led_error_reported = false;
     bool overflow_reported = false;
@@ -93,9 +122,11 @@ static void run_mouse(void)
         for (;;)
         {
             int64_t now_us = esp_timer_get_time();
+            /* Intentional uint32 wrap matches mouse_input's elapsed-time arithmetic. */
             const uint32_t now_ms = (uint32_t)((uint64_t)now_us / UINT64_C(1000));
             const ble_mouse_status_t link = ble_mouse_status();
             mouse_report_t report = {0};
+            /* 1. Synchronize link/input state before considering this tick's motion. */
             if (generation != link.generation)
             {
                 generation = link.generation;
@@ -104,9 +135,11 @@ static void run_mouse(void)
                 mouse_motion_clear_residuals(&motion);
             }
             mouse_input_update(&input, board_hal_keys(), now_ms, link.ready);
+            /* 2. Retry sensor setup only on its deadline; retain button service. */
             if ((!sensor_online) && (now_us >= retry_at_us))
             {
                 esp_err_t result = ESP_OK;
+                /* Retry cleanup too if an earlier device-removal call failed. */
                 if (sensor.device != NULL)
                 {
                     result = mpu6050_deinit(&sensor);
@@ -122,6 +155,8 @@ static void run_mouse(void)
                     sensor_online = true;
                     read_failures = 0U;
                     configuration_valid = mouse_motion_init(&motion, &s_motion_config);
+                    /* Setup includes delays: begin with one nominal sample interval,
+                     * and reset the scheduler baseline instead of catching up in a burst. */
                     previous_sample_us = now_us - INT64_C(10000);
                     wake_tick = xTaskGetTickCount();
                     ESP_LOGI(TAG, "MPU6050 found at 0x%02x; keep still for 2 seconds",
@@ -133,6 +168,7 @@ static void run_mouse(void)
                              esp_err_to_name(result));
                 }
             }
+            /* 3. Convert one coherent MPU reading into calibrated relative movement. */
             if (sensor_online && configuration_valid)
             {
                 mouse_imu_sample_t sample = {0};
@@ -142,6 +178,7 @@ static void run_mouse(void)
                     read_failures = 0U;
                     const int64_t interval_us = now_us - previous_sample_us;
                     previous_sample_us = now_us;
+                    /* A long stall must not become an excessive integrated gyro step. */
                     const float interval = ((interval_us > 0) && (interval_us <= 50000)) ?
                         ((float)interval_us / 1000000.0F) : 0.01F;
                     const bool previously_ready = motion.ready;
@@ -165,6 +202,8 @@ static void run_mouse(void)
                     read_failures++;
                     previous_sample_us = now_us;
                     mouse_motion_clear_residuals(&motion);
+                    /* Escalate repeated transport failures to a fresh calibration;
+                     * isolated failures simply leave this tick's movement at zero. */
                     if (read_failures >= MAX_READ_FAILURES)
                     {
                         sensor_online = false;
@@ -176,6 +215,7 @@ static void run_mouse(void)
                     }
                 }
             }
+            /* 4. Apply the mode gesture after updating attitude, using its latest value. */
             if (input.recenter && motion.ready)
             {
                 mouse_motion_recenter(&motion);
@@ -191,6 +231,8 @@ static void run_mouse(void)
                 report.y = 0;
                 mouse_motion_clear_residuals(&motion);
             }
+            /* 5. Send only current-session data. Relative displacement accumulated
+             * without a usable host must not jump the pointer after reconnection. */
             if (!link.ready)
             {
                 mouse_motion_clear_residuals(&motion);
@@ -206,6 +248,7 @@ static void run_mouse(void)
                     if (result == ESP_OK)
                     {
                         sent_buttons = report.buttons;
+                        /* SDK acceptance is the queue checkpoint, not a delay or retry count. */
                         if (button_event)
                         {
                             mouse_input_ack(&input);
@@ -227,8 +270,10 @@ static void run_mouse(void)
                 ESP_LOGE(TAG, "Button queue full: forcing release; release physical buttons");
             }
             overflow_reported = input.overflow;
+            /* 6. Feed rollback health without requiring a currently paired host. */
             ota_update_boot_health(sensor_online && motion.ready && configuration_valid &&
                                    (read_failures == 0U));
+            /* LED states expose calibration, connectivity, scroll mode and activity. */
             const bool sensor_led = sensor_online &&
                 (motion.ready || (((now_ms / UINT32_C(250)) % 2U) != 0U));
             const bool link_led = link.ready || ((!link.connected) &&
@@ -242,6 +287,8 @@ static void run_mouse(void)
                 ESP_LOGE(TAG, "LED update: %s", esp_err_to_name(led_result));
                 led_error_reported = true;
             }
+            /* Delay against the previous wake time to avoid adding work duration
+             * to every nominal 10 ms period. A missed deadline is not an API error. */
             (void)xTaskDelayUntil(&wake_tick, pdMS_TO_TICKS(LOOP_PERIOD_MS));
         }
     }
@@ -251,6 +298,10 @@ static void run_mouse(void)
     }
 }
 
+/**
+ * @brief ESP-IDF entry point; start the application or report a fatal startup error.
+ * @note A pending OTA image requests rollback on fatal initialization failure.
+ */
 void app_main(void)
 {
     const esp_err_t result = initialize();

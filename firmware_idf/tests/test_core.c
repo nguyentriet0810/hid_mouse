@@ -1,6 +1,14 @@
 /* SPDX-License-Identifier: MIT
  * Host tests are verification code, outside the production MISRA scope.
  */
+/**
+ * @file test_core.c
+ * @brief Deterministic host checks for motion math, button timing and OTA policy.
+ *
+ * Fixtures provide physical sensor units and explicit timestamps, so these tests
+ * need neither ESP-IDF nor a connected board. They do not exercise the BLE radio,
+ * I2C driver, physical flash writes or bootloader rollback.
+ */
 #include <assert.h>
 #include <math.h>
 #include <stddef.h>
@@ -10,6 +18,7 @@
 #include "mouse_motion.h"
 #include "test_ota_policy.h"
 
+/** Match production defaults so displacement assertions use known gains and limits. */
 static const mouse_motion_config_t CONFIGURATION = {
     .deadzone_degrees = 6.0F,
     .pixels_per_second_per_degree = 45.0F,
@@ -18,12 +27,14 @@ static const mouse_motion_config_t CONFIGURATION = {
     .invert_x = false,
     .invert_y = false
 };
+/** Stationary, level MPU fixture: +1 g on Z and zero angular velocity. */
 static const mouse_imu_sample_t LEVEL = {
     .accel_x_g = 0.0F, .accel_y_g = 0.0F, .accel_z_g = 1.0F,
     .gyro_x_dps = 0.0F, .gyro_y_dps = 0.0F, .gyro_z_dps = 0.0F
 };
 static uint32_t s_tests = 0U;
 
+/** Prepare a ready filter and check the exact 199-pending/200th-ready boundary. */
 static void calibrated(mouse_motion_t * const motion)
 {
     mouse_report_t report = {0};
@@ -183,6 +194,7 @@ static void test_gyro_bias(void)
     ++s_tests;
 }
 
+/** Assert FIFO ordering before acknowledging a state, just as accepted HID sends do. */
 static void expect_buttons(mouse_input_t * const input, uint8_t expected)
 {
     uint8_t buttons = 0xFFU;
@@ -299,8 +311,10 @@ static void test_overflow_forces_release(void)
     ++s_tests;
 }
 
+/** Run every group; assertion failure exits immediately instead of reporting a false pass. */
 int main(void)
 {
+    /* Physical-unit and numeric-boundary checks are independent of button timing. */
     test_configuration();
     test_stationary();
     test_motion_rejected_during_calibration();
@@ -309,12 +323,14 @@ int main(void)
     test_tilt_scroll_and_recenter();
     test_fractional_motion_and_horizontal_direction();
     test_gyro_bias();
+    /* Explicit timestamps cover debounce, held state, backlog and timer rollover. */
     test_debounce_and_drag();
     test_click_edges_survive_backpressure();
     test_disconnect_clears_events_and_rearms_after_release();
     test_mode_short_press_and_scroll();
     test_timer_wraparound();
     test_overflow_forces_release();
+    /* The separate policy suite reports its five logical groups to this runner. */
     s_tests += test_ota_policy();
     (void)printf("PASS: %lu core test groups\n", (unsigned long)s_tests);
     return 0;
